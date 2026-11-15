@@ -1,0 +1,10 @@
+{
+  "name": "Oklahoma RideApp",
+  "description": "Oklahoma-only pre-scheduled rideshare cooperative featuring zero surge pricing, 70% direct driver payouts, 5% local Oklahoma charity impact, and native dark-mode GPS radar.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
