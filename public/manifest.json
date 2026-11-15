@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "name": "Oklahoma RideApp",
+  "short_name": "RideApp",
+  "description": "Oklahoma-only rideshare cooperative with zero surge pricing, 70% direct driver pay, and 5% Oklahoma charity funding.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#02050E",
+  "background_color": "#02050E",
+  "icons": [
+    {
+      "src": "logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
