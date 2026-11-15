@@ -1,0 +1,141 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-display: "Cinzel", Georgia, serif;
+  --font-sans: "Montserrat", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: #050507;
+    color: #DFC07D;
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  h1,
+  h2,
+  .font-cinzel {
+    font-family: var(--font-display);
+  }
+}
+
+/* Mobile Phone Container Locked Dimensions + Containing Block for Fixed Bars/Modals */
+.phone-screen-shell {
+  width: 100%;
+  max-width: 400px;
+  height: 100vh;
+  height: 100dvh;
+  max-height: 820px;
+  margin: 0 auto;
+  position: relative;
+  overflow: hidden;
+  background-color: #02050E;
+  transform: translateZ(0);
+}
+
+/* Smooth Vertical Scroll Area Inside Phone Screen with Thin Dark Scrollbar */
+.phone-scroll-area {
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(197, 160, 89, 0.32) transparent;
+}
+
+.phone-scroll-area::-webkit-scrollbar {
+  width: 4px;
+}
+
+.phone-scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.phone-scroll-area::-webkit-scrollbar-thumb {
+  background: rgba(197, 160, 89, 0.35);
+  border-radius: 9999px;
+}
+
+/* Exact Brushed Metallic Champagne-Gold Foil Button (Natural Compact Height) */
+.btn-gold-luxury,
+.btn-gold {
+  background: linear-gradient(110deg, #8A6D3B 0%, #DFC07D 28%, #FFF2CC 50%, #C5A059 72%, #7A5C29 100%);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.6), 0 4px 15px rgba(2, 6, 18, 0.75);
+  border: 1px solid #DFC07D;
+  color: #0B0B0D;
+  font-weight: 700;
+}
+
+.btn-gold-luxury:not(.slider-thumb),
+.btn-gold:not(.slider-thumb) {
+  height: auto;
+  min-height: 0;
+  padding: 12px 16px;
+  line-height: 1.25;
+}
+
+.btn-gold-luxury:hover,
+.btn-gold:hover {
+  filter: brightness(1.06);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.72), 0 6px 18px rgba(2, 6, 18, 0.85);
+}
+
+/* Dark Semi-Transparent Glass Card over Crisp Samsung S7 Blue Wave */
+.obsidian-login-card {
+  height: auto;
+  padding: 12px 16px;
+  background: rgba(2, 6, 18, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(184, 150, 80, 0.42);
+  box-shadow: 0 16px 40px rgba(2, 5, 14, 0.75);
+}
+
+/* RideApp Title & Active Tab Soft Metallic Glow */
+.text-champagne-glow {
+  color: #DFC07D;
+  text-shadow: 0 2px 10px rgba(223, 192, 125, 0.25);
+}
+
+/* Dark Semi-Transparent Glass Surface (rgba(2, 6, 18, 0.72)) */
+.frosted-glass {
+  height: auto;
+  padding: 12px 16px;
+  background: rgba(2, 6, 18, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(184, 150, 80, 0.35);
+}
+
+.text-gold-metallic {
+  color: #DFC07D;
+  text-shadow: 0 2px 10px rgba(223, 192, 125, 0.25);
+}
+
+/* Leaflet Dark-Mode Customization */
+.leaflet-container {
+  background-color: #02050E;
+  font-family: var(--font-sans);
+}
+
+.leaflet-control-attribution {
+  background: rgba(2, 6, 18, 0.8) !important;
+  color: rgba(184, 150, 80, 0.78) !important;
+  font-size: 10px !important;
+  border-top-left-radius: 6px;
+}
+
+.leaflet-control-attribution a {
+  color: #DFC07D !important;
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: rgba(2, 6, 18, 0.88) !important;
+  color: #DFC07D !important;
+  border: 1px solid rgba(184, 150, 80, 0.45);
+}
