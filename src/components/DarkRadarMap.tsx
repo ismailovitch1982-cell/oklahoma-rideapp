@@ -49,7 +49,13 @@ interface WatchedPosition {
 
 const OKC_CENTER: [number, number] = [-97.5164, 35.4676];
 const ROUTE_SOURCE_ID = 'driver-route';
-const ROUTE_LAYER_IDS = ['driver-route-glow', 'driver-route-line'];
+const ROUTE_LAYER_IDS = [
+  'driver-route-glow',
+  'driver-route-casing',
+  'driver-route-line',
+];
+const VOYAGER_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+const LIBERTY_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
 
 function distanceMeters(from: GeoPoint, to: GeoPoint): number {
   const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
@@ -188,15 +194,19 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: 'https://tiles.openfreemap.org/styles/liberty',
+      style: VOYAGER_STYLE,
       center: OKC_CENTER,
-      zoom: 11,
+      zoom: 14,
       pitch: 0,
       bearing: 0,
     });
     mapRef.current = map;
 
-    const handleLoad = () => {
+    let styleLoaded = false;
+    let usedFallback = false;
+    const handleStyleLoad = () => {
+      styleLoaded = true;
+      map.resize();
       if (!map.getSource(ROUTE_SOURCE_ID)) {
         map.addSource(ROUTE_SOURCE_ID, {
           type: 'geojson',
@@ -208,10 +218,10 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
           source: ROUTE_SOURCE_ID,
           layout: {'line-cap': 'round', 'line-join': 'round'},
           paint: {
-            'line-color': '#f4d576',
-            'line-width': 16,
-            'line-blur': 9,
-            'line-opacity': 0.6,
+            'line-color': '#D4AF37',
+            'line-width': 17,
+            'line-blur': 7,
+            'line-opacity': 0.38,
           },
         });
         map.addLayer({
@@ -220,22 +230,44 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
           source: ROUTE_SOURCE_ID,
           layout: {'line-cap': 'round', 'line-join': 'round'},
           paint: {
-            'line-color': '#d4af37',
-            'line-width': 6,
-            'line-opacity': 0.98,
+            'line-color': '#D4AF37',
+            'line-width': 11,
+            'line-opacity': 1,
+          },
+        });
+        map.addLayer({
+          id: ROUTE_LAYER_IDS[2],
+          type: 'line',
+          source: ROUTE_SOURCE_ID,
+          layout: {'line-cap': 'round', 'line-join': 'round'},
+          paint: {
+            'line-color': '#2563EB',
+            'line-width': 7,
+            'line-opacity': 1,
           },
         });
       }
       setMapReady(true);
     };
+    const handleMapError = (event: maplibregl.ErrorEvent) => {
+      if (!styleLoaded && !usedFallback) {
+        usedFallback = true;
+        console.error('Carto Voyager style failed; falling back to OpenFreeMap Liberty:', event.error);
+        map.setStyle(LIBERTY_STYLE);
+        return;
+      }
+      console.error('Map rendering error:', event.error);
+    };
 
-    map.on('load', handleLoad);
+    map.on('style.load', handleStyleLoad);
+    map.on('error', handleMapError);
     const resizeObserver = new ResizeObserver(() => map.resize());
     resizeObserver.observe(containerRef.current);
 
     return () => {
       resizeObserver.disconnect();
-      map.off('load', handleLoad);
+      map.off('style.load', handleStyleLoad);
+      map.off('error', handleMapError);
       carMarkerRef.current?.remove();
       pickupMarkerRef.current?.remove();
       dropoffMarkerRef.current?.remove();
@@ -438,8 +470,27 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
     : 'bottom-3';
 
   return (
-    <div className={`relative w-full overflow-hidden bg-[#0B0B0D] ${heightClass}`}>
-      <div ref={containerRef} className="absolute inset-0 z-0" />
+    <div className={`relative w-full overflow-hidden bg-[#e8eaed] ${heightClass}`}>
+      <div
+        ref={containerRef}
+        className={
+          fullScreen
+            ? 'fixed inset-0 z-0 h-screen w-screen bg-[#e8eaed]'
+            : 'absolute inset-0 z-0 bg-[#e8eaed]'
+        }
+        style={
+          fullScreen
+            ? {
+                position: 'fixed',
+                inset: 0,
+                width: '100vw',
+                height: '100vh',
+                zIndex: 0,
+                background: '#e8eaed',
+              }
+            : undefined
+        }
+      />
       <div
         ref={overlayContainerRef}
         className="pointer-events-none absolute inset-0 z-40"

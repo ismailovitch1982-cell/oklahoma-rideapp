@@ -1738,7 +1738,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       <main
         className={
           activeTab === 'home'
-            ? 'absolute inset-0 max-w-none overflow-hidden'
+            ? 'absolute inset-0 z-0 max-w-none overflow-hidden'
             : 'mx-auto flex max-w-3xl flex-col gap-3 px-3.5 pt-3 sm:px-5'
         }
       >
