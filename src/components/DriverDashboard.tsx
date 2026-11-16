@@ -318,6 +318,49 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   const sliderTrackRef = useRef<HTMLDivElement | null>(null);
   const [sliderProgress, setSliderProgress] = useState<number>(0);
   const [isDraggingSlider, setIsDraggingSlider] = useState<boolean>(false);
+  const ringtoneContextRef = useRef<AudioContext | null>(null);
+  const ringtoneIntervalRef = useRef<number | null>(null);
+
+  const stopOfferRingtone = () => {
+    if (ringtoneIntervalRef.current !== null) {
+      window.clearInterval(ringtoneIntervalRef.current);
+      ringtoneIntervalRef.current = null;
+    }
+    const context = ringtoneContextRef.current;
+    if (context && context.state === 'running') {
+      void context.suspend().catch((error: unknown) => {
+        console.error('Unable to pause incoming ride ringtone:', error);
+      });
+    }
+  };
+
+  const prepareRingtoneAudio = () => {
+    if (!('AudioContext' in window)) return;
+    let context = ringtoneContextRef.current;
+    if (!context || context.state === 'closed') {
+      context = new window.AudioContext();
+      ringtoneContextRef.current = context;
+    }
+    void context.resume().catch((error: unknown) => {
+      console.error('Unable to prepare incoming ride audio:', error);
+    });
+  };
+
+  useEffect(
+    () => () => {
+      if (ringtoneIntervalRef.current !== null) {
+        window.clearInterval(ringtoneIntervalRef.current);
+      }
+      const context = ringtoneContextRef.current;
+      ringtoneContextRef.current = null;
+      if (context && context.state !== 'closed') {
+        void context.close().catch((error: unknown) => {
+          console.error('Unable to close incoming ride audio:', error);
+        });
+      }
+    },
+    []
+  );
 
   // If expired doc appears while online, pause online and show alert modal
   useEffect(() => {
@@ -434,9 +477,57 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     return () => window.clearInterval(timer);
   }, [currentOfferRide?.id]);
 
+  useEffect(() => {
+    if (!currentOfferRide || !('AudioContext' in window)) return;
+    prepareRingtoneAudio();
+    const context = ringtoneContextRef.current;
+    if (!context) return;
+
+    const ring = () => {
+      if (context.state !== 'running') return;
+      const startAt = context.currentTime;
+      [0, 0.22, 0.52, 0.74].forEach((offset, index) => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const start = startAt + offset;
+        oscillator.type = 'sine';
+        oscillator.frequency.value = index % 2 === 0 ? 880 : 660;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.16, start + 0.025);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.19);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.onended = () => {
+          oscillator.disconnect();
+          gain.disconnect();
+        };
+        oscillator.start(start);
+        oscillator.stop(start + 0.2);
+      });
+    };
+
+    void context.resume().then(ring).catch((error: unknown) => {
+      console.error('Unable to play incoming ride ringtone:', error);
+    });
+    ringtoneIntervalRef.current = window.setInterval(ring, 1500);
+
+    return () => {
+      if (ringtoneIntervalRef.current !== null) {
+        window.clearInterval(ringtoneIntervalRef.current);
+        ringtoneIntervalRef.current = null;
+      }
+      if (context.state === 'running') {
+        void context.suspend().catch((error: unknown) => {
+          console.error('Unable to pause incoming ride ringtone:', error);
+        });
+      }
+    };
+  }, [currentOfferRide?.id]);
+
   // Auto-decline and pass to next closest Oklahoma driver when the timer hits 0
   useEffect(() => {
     if (!currentOfferRide || offerSecondsLeft > 0) return;
+    stopOfferRingtone();
     setDismissedOfferIds((prev) =>
       prev.includes(currentOfferRide.id) ? prev : [...prev, currentOfferRide.id]
     );
@@ -613,6 +704,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       return;
     }
     const next = !isOnline;
+    if (next) prepareRingtoneAudio();
     setIsOnline(next);
     onUpdateUser({...user, isOnline: next});
   };
@@ -622,6 +714,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       setShowExpiredAlertModal(true);
       return;
     }
+    stopOfferRingtone();
 
     // Immediately trigger HTML5 watchPosition reading
     if ('geolocation' in navigator) {
@@ -674,6 +767,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   };
 
   const handleDeclineRide = (res: RideReservation) => {
+    stopOfferRingtone();
     setDismissedOfferIds((prev) => [...prev, res.id]);
     setActiveOfferId(null);
     onUpdateReservation({
@@ -1508,14 +1602,58 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
   const sliderStageLabel =
     activeTripStage === 'en_route_pickup'
-      ? 'ARRIVED AT PICKUP'
+      ? 'SLIDE WHEN ARRIVED AT PICKUP'
       : activeTripStage === 'arrived_pickup'
       ? hasStop1
-        ? 'ARRIVED AT STOP 1'
-        : 'START TRIP'
+        ? 'SLIDE WHEN ARRIVED AT STOP 1'
+        : 'SLIDE TO START TRIP (RIDER PICKED UP)'
       : activeTripStage === 'arrived_stop1'
-      ? 'CONTINUE TO DROP-OFF'
-      : 'COMPLETE TRIP';
+      ? 'SLIDE TO CONTINUE TO DROP-OFF'
+      : 'SLIDE TO COMPLETE DROP-OFF';
+
+  const tripStageSlider = activeAcceptedRide && (
+    <div className="space-y-1.5">
+      <div
+        ref={sliderTrackRef}
+        className="relative h-12 rounded-xl border-2 border-[#DFC07D] bg-[#080808]/90 backdrop-blur-xl overflow-hidden select-none touch-none"
+      >
+        <div
+          className="absolute inset-y-0 left-0 bg-gradient-to-r from-[#8A6D3B]/45 via-[#DFC07D]/35 to-[#FFF2CC]/45 transition-[width] duration-75"
+          style={{width: `${Math.max(12, sliderProgress * 100)}%`}}
+        />
+        <button
+          type="button"
+          onClick={() => handleAdvanceTripStage(activeAcceptedRide)}
+          className="absolute inset-0 flex h-full w-full items-center justify-center pl-10 text-xs font-extrabold tracking-[0.1em] text-champagne-glow cursor-pointer"
+        >
+          <span>{sliderStageLabel}</span>
+        </button>
+        <div
+          role="slider"
+          aria-label={sliderStageLabel}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(sliderProgress * 100)}
+          tabIndex={0}
+          onPointerDown={() => setIsDraggingSlider(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              handleAdvanceTripStage(activeAcceptedRide);
+            }
+          }}
+          style={{
+            transform: `translateX(calc(${sliderProgress} * (100% - 56px)))`,
+          }}
+          className="slider-thumb relative z-10 flex h-full w-12 items-center justify-center rounded-lg btn-gold-luxury cursor-grab active:cursor-grabbing"
+        >
+          <ChevronRight className="h-5 w-5 text-[#0B0B0D]" />
+        </div>
+      </div>
+      <p className="text-center text-[10px] text-[#B89650]">
+        Slide or tap to confirm
+      </p>
+    </div>
+  );
 
   const driverInitials = user.name
     .split(' ')
@@ -1526,14 +1664,32 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
   return (
     <div
-      className={`min-h-full bg-transparent text-[#DFC07D] ${
-        activeTab === 'home' ? 'pb-36' : 'pb-24'
+      className={`bg-transparent text-[#DFC07D] ${
+        activeTab === 'home'
+          ? 'relative h-[calc(100dvh-64px)] min-h-[480px] overflow-hidden'
+          : 'relative min-h-full pb-24'
       }`}
       onPointerMove={(e) => handleSliderPointerMove(e.clientX)}
       onPointerUp={handleSliderPointerEnd}
       onPointerCancel={handleSliderPointerEnd}
     >
-      {/* 1. TOP HEADER BAR (Clean Logo Left + Centered Today's Earnings Pill) */}
+      {activeTab === 'home' ? (
+        <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('earnings')}
+            className="flex h-11 items-center gap-2 rounded-full border border-[#DFC07D]/90 bg-[#080808]/90 px-5 text-[#DFC07D] shadow-[0_0_22px_rgba(212,175,55,0.28)] backdrop-blur-xl"
+            aria-label="Open Today's Earnings Breakdown"
+          >
+            <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#B89650]">
+              Today's Earnings
+            </span>
+            <span className="font-mono text-sm font-extrabold tabular-nums">
+              ${todayEarnings.toFixed(2)}
+            </span>
+          </button>
+        </div>
+      ) : (
       <header className="sticky top-0 z-30 bg-[#020612]/72 backdrop-blur-[10px] border-b border-[#C5A059]/30">
         <div className="max-w-3xl mx-auto grid grid-cols-3 items-center gap-2 px-3.5 sm:px-5 h-14">
           <div className="flex items-center gap-2 min-w-0">
@@ -1577,49 +1733,38 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
           </div>
         </div>
       </header>
+      )}
 
-      <main className="max-w-3xl mx-auto px-3.5 sm:px-5 pt-3 flex flex-col gap-3">
-        <div>
-          <DarkRadarMap
-            pickup={activeAcceptedRide?.pickupCoords}
-            pickupLabel={activeAcceptedRide?.pickupAddress}
-            dropoff={activeAcceptedRide?.dropoffCoords}
-            dropoffLabel={activeAcceptedRide?.dropoffAddress}
-            driverCoords={liveGps}
-            userGps={liveGps}
-            activeTripStage={activeAcceptedRide ? activeTripStage : undefined}
-            targetCoords={activeAcceptedRide ? activeTargetCoords : null}
-            targetLabel={activeTargetAddress || undefined}
-            gpsWatchActive={gpsWatchActive}
-            overlayContainerRef={setMapOfferOverlay}
-          />
-
-          {activeTab === 'home' && !currentOfferRide && !activeAcceptedRide && (
-            <div className="flex justify-center pt-3">
-              <button
-                type="button"
-                onClick={handleToggleOnline}
-                aria-pressed={isOnline}
-                className={`h-auto py-3 px-8 rounded-full text-sm font-extrabold tracking-[0.18em] uppercase flex items-center justify-center gap-2.5 cursor-pointer transition-all active:scale-[0.98] ${
-                  isOnline
-                    ? 'bg-[#020612]/72 backdrop-blur-[10px] border-2 border-[#DFC07D] text-[#DFC07D] shadow-[0_8px_28px_rgba(0,0,0,0.92)] hover:bg-[#C5A059]/15'
-                    : 'btn-gold-luxury shadow-[0_8px_28px_rgba(212,175,55,0.38)]'
-                }`}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-[#0B0B0D]'
-                  }`}
-                />
-                <span>{isOnline ? 'GO OFFLINE' : 'GO ONLINE'}</span>
-              </button>
-            </div>
-          )}
-        </div>
+      <main
+        className={
+          activeTab === 'home'
+            ? 'absolute inset-0 max-w-none overflow-hidden'
+            : 'mx-auto flex max-w-3xl flex-col gap-3 px-3.5 pt-3 sm:px-5'
+        }
+      >
+        <DarkRadarMap
+          pickup={activeAcceptedRide?.pickupCoords}
+          pickupLabel={activeAcceptedRide?.pickupAddress}
+          dropoff={activeAcceptedRide?.dropoffCoords}
+          dropoffLabel={activeAcceptedRide?.dropoffAddress}
+          driverCoords={liveGps}
+          userGps={liveGps}
+          activeTripStage={activeAcceptedRide ? activeTripStage : undefined}
+          targetCoords={activeAcceptedRide ? activeTargetCoords : null}
+          targetLabel={activeTargetAddress || undefined}
+          gpsWatchActive={gpsWatchActive}
+          overlayContainerRef={setMapOfferOverlay}
+          heightClass={
+            activeTab === 'home'
+              ? 'h-full'
+              : 'h-[300px] rounded-2xl border border-[#D4AF37]'
+          }
+          showRecenterButton={activeTab === 'home'}
+          fullScreen={activeTab === 'home'}
+        />
 
         {/* Subtle Success Notifications */}
-        {(cashOutSuccessToast || taxDownloadToast || actionToast) && (
+        {activeTab !== 'home' && (cashOutSuccessToast || taxDownloadToast || actionToast) && (
           <div className="rounded-xl border border-[#DFC07D]/60 bg-[#C5A059]/15 px-4 py-3 text-xs font-semibold text-[#DFC07D] flex items-center justify-between gap-2">
             <span className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-[#DFC07D] shrink-0" />
@@ -1654,7 +1799,59 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
         {/* TAB 1: HOME (CLEAN UBER-STYLE OKLAHOMA DISPATCH SCREEN)          */}
         {/* ================================================================ */}
         {activeTab === 'home' && (
-          <div className="flex flex-col gap-3">
+          <div className="absolute bottom-3 left-3 right-3 z-30 max-h-[60%] overflow-y-auto rounded-2xl border border-[#D4AF37]/70 bg-[#080808]/90 p-3 shadow-[0_12px_42px_rgba(0,0,0,0.65)] backdrop-blur-xl">
+            <section className="mb-3 space-y-2.5 rounded-xl border border-[#D4AF37]/45 bg-black/55 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-bold text-[#DFC07D]">
+                    {isOnline ? "You're online" : "You're offline"}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-[#B89650]">
+                    {activeAcceptedRide
+                      ? `${activeAcceptedRide.riderName} · ${activeTargetAddress}`
+                      : 'Oklahoma City · Live phone GPS'}
+                  </div>
+                </div>
+                <span
+                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                    isOnline ? 'animate-pulse bg-emerald-400' : 'bg-[#8c7770]'
+                  }`}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleToggleOnline}
+                aria-pressed={isOnline}
+                className="btn-gold-luxury h-11 w-full rounded-xl text-xs font-extrabold tracking-[0.16em] shadow-[0_6px_20px_rgba(212,175,55,0.2)]"
+              >
+                {isOnline ? 'GO OFFLINE' : 'GO ONLINE'}
+              </button>
+              {isOnline && !activeAcceptedRide && (
+                <button
+                  type="button"
+                  onClick={handleSpawnSampleDispatch}
+                  disabled={Boolean(currentOfferRide)}
+                  className="h-9 w-full rounded-lg border border-[#DFC07D]/55 bg-black/40 text-[11px] font-bold tracking-wider text-[#DFC07D] disabled:opacity-50"
+                >
+                  Test Instant Ride
+                </button>
+              )}
+              {activeAcceptedRide &&
+                (activeTripStage === 'arrived_pickup' ||
+                  activeTripStage === 'arrived_stop1') && (
+                  <div className="flex items-center justify-between rounded-lg border border-[#DFC07D]/40 bg-black/35 px-3 py-2 text-xs">
+                    <span className="text-[#B89650]">RIDER WAIT</span>
+                    <span className="font-mono text-sm font-extrabold text-[#DFC07D]">
+                      {formatDurationMMSS(
+                        Math.max(0, FREE_WAIT_LIMIT_SECONDS - waitSeconds)
+                      )}
+                    </span>
+                  </div>
+                )}
+              {tripStageSlider}
+            </section>
+
+            <div className="flex flex-col gap-3">
             {/* Expired Document Blocking Alert (Compact Banner if Locked) */}
             {expiredDocs.length > 0 && (
               <div className="rounded-xl border border-amber-500/60 bg-amber-950/35 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs">
@@ -1676,10 +1873,14 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
             {/* POST-ACCEPTANCE ACTIVE TRIP CARD (Replaces Feed/Offer when Ride Accepted) */}
             {activeAcceptedRide ? (
-              <section
-                aria-label="Active Trip Card"
-                className="obsidian-login-card relative rounded-2xl border-2 border-[#DFC07D] p-4 sm:p-5 space-y-3.5 shadow-[0_12px_40px_rgba(0,0,0,0.85)]"
-              >
+              <details className="space-y-2">
+                <summary className="cursor-pointer rounded-lg border border-[#DFC07D]/35 bg-black/35 px-3 py-2 text-xs font-bold text-[#DFC07D]">
+                  Trip details and rider tools
+                </summary>
+                <section
+                  aria-label="Active Trip Card"
+                  className="obsidian-login-card relative rounded-2xl border-2 border-[#DFC07D] p-4 sm:p-5 space-y-3.5 shadow-[0_12px_40px_rgba(0,0,0,0.85)]"
+                >
                 {/* Header with Pulsing Gold Live GPS Badge & 70% Payout */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="space-y-1 min-w-0">
@@ -2029,54 +2230,14 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                     </form>
                   </div>
                 )}
-
-                {/* Stage-by-Stage Uber/Lyft Action Slider Button */}
-                <div className="pt-1 space-y-1.5">
-                  <div
-                    ref={sliderTrackRef}
-                    className="relative h-12 rounded-xl bg-[#020612]/72 backdrop-blur-[10px] border-2 border-[#DFC07D] overflow-hidden select-none touch-none"
-                  >
-                    <div
-                      className="absolute inset-y-0 left-0 bg-gradient-to-r from-[#8A6D3B]/45 via-[#DFC07D]/35 to-[#FFF2CC]/45 transition-[width] duration-75"
-                      style={{width: `${Math.max(12, sliderProgress * 100)}%`}}
-                    />
-
-                    <button
-                      type="button"
-                      onClick={() => handleAdvanceTripStage(activeAcceptedRide)}
-                      className="absolute inset-0 w-full h-full flex items-center justify-center text-xs sm:text-sm font-extrabold tracking-[0.16em] uppercase text-champagne-glow cursor-pointer pl-10"
-                    >
-                      <span>{sliderStageLabel}</span>
-                    </button>
-
-                    <div
-                      role="slider"
-                      aria-label={sliderStageLabel}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={Math.round(sliderProgress * 100)}
-                      tabIndex={0}
-                      onPointerDown={() => setIsDraggingSlider(true)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          handleAdvanceTripStage(activeAcceptedRide);
-                        }
-                      }}
-                      style={{
-                        transform: `translateX(calc(${sliderProgress} * (100% - 56px)))`,
-                      }}
-                      className="slider-thumb relative z-10 w-12 h-full rounded-lg btn-gold-luxury flex items-center justify-center cursor-grab active:cursor-grabbing"
-                    >
-                      <ChevronRight className="w-5 h-5 text-[#0B0B0D]" />
-                    </div>
-                  </div>
-                  <p className="text-[10px] text-center text-[#B89650]">
-                    Slide or tap to confirm: {sliderStageLabel}
-                  </p>
-                </div>
-              </section>
+                </section>
+              </details>
             ) : (
-              <>
+              <details className="space-y-2">
+                <summary className="cursor-pointer rounded-lg border border-[#DFC07D]/35 bg-black/35 px-3 py-2 text-xs font-bold text-[#DFC07D]">
+                  Ride queue · {reservedPendingRides.length} scheduled
+                </summary>
+                <>
                 {/* MIDDLE WORKSPACE: Dispatch Toolbar + Simulate Instant Ride */}
                 <section className="obsidian-login-card rounded-xl p-4 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -2224,8 +2385,10 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                     })
                   )}
                 </section>
-              </>
+                </>
+              </details>
             )}
+            </div>
           </div>
         )}
 
@@ -3271,9 +3434,9 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
           role="dialog"
           aria-modal="true"
           aria-label="5-Second Instant Ride Offer"
-          className="absolute inset-0 z-20 overflow-y-auto bg-[#020612]/95 p-2 pointer-events-auto"
+          className="absolute inset-0 z-40 flex items-center justify-center bg-black/35 p-3 pointer-events-auto"
         >
-          <div className="w-full min-h-full max-w-lg mx-auto obsidian-login-card rounded-2xl border-2 border-[#DFC07D] shadow-[0_-10px_40px_rgba(0,0,0,0.95)] overflow-hidden">
+          <div className="w-full max-w-lg max-h-full overflow-y-auto rounded-2xl border-2 border-[#DFC07D] bg-[#080808]/95 shadow-[0_12px_42px_rgba(0,0,0,0.8)] backdrop-blur-xl">
             {/* Live 5-Second Shrinking Gold Countdown Bar */}
             <div className="h-2.5 w-full bg-[#020612]/72 backdrop-blur-[10px] overflow-hidden">
               <div

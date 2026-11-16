@@ -1,5 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
-import L from 'leaflet';
+import * as maplibregl from 'maplibre-gl';
+import type {GeoJSONSource, Map, Marker} from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import {ActiveTripStage, GeoPoint} from '../types/rideapp';
 
 interface DarkRadarMapProps {
@@ -16,6 +18,8 @@ interface DarkRadarMapProps {
   gpsWatchActive?: boolean;
   overlayContainerRef?: React.Ref<HTMLDivElement>;
   heightClass?: string;
+  showRecenterButton?: boolean;
+  fullScreen?: boolean;
 }
 
 interface RouteStep {
@@ -31,10 +35,21 @@ interface RouteStep {
 interface OsrmRouteResponse {
   code: string;
   routes?: Array<{
+    distance: number;
+    duration: number;
     geometry: {coordinates: [number, number][]};
     legs: Array<{steps: RouteStep[]}>;
   }>;
 }
+
+interface WatchedPosition {
+  coords: GeoPoint;
+  heading: number | null;
+}
+
+const OKC_CENTER: [number, number] = [-97.5164, 35.4676];
+const ROUTE_SOURCE_ID = 'driver-route';
+const ROUTE_LAYER_IDS = ['driver-route-glow', 'driver-route-line'];
 
 function distanceMeters(from: GeoPoint, to: GeoPoint): number {
   const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
@@ -66,31 +81,64 @@ function describeTurn(step: RouteStep): string {
   return step.name ? `${action} onto ${step.name}` : action;
 }
 
-function createPinIcon(bgHex: string, ringHex: string, glyph: string): L.DivIcon {
-  return L.divIcon({
-    className: 'custom-rideapp-pin',
-    html: `<div style="width:32px;height:32px;border-radius:9999px;background:${bgHex};border:2px solid ${ringHex};box-shadow:0 4px 14px rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;color:#0B0B0D;font-weight:700;font-size:12px;">${glyph}</div>`,
-    iconSize: [32, 32],
-    iconAnchor: [16, 16],
-    popupAnchor: [0, -16],
-  });
+function turnArrow(step?: RouteStep): string {
+  const {type, modifier} = step?.maneuver ?? {type: 'continue'};
+  if (type === 'arrive') return '●';
+  if (type === 'roundabout' || type === 'rotary') return '↻';
+  if (modifier?.includes('left')) return modifier.includes('sharp') ? '↶' : '↰';
+  if (modifier?.includes('right')) return modifier.includes('sharp') ? '↷' : '↱';
+  return '↑';
 }
 
-function createDriverCarIcon(): L.DivIcon {
-  return L.divIcon({
-    className: 'custom-rideapp-driver',
-    html: `<div style="width:38px;height:38px;border-radius:9999px;background:linear-gradient(135deg,#DFC07D 0%,#B8860B 50%,#8B6508 100%);border:2px solid #0B0B0D;box-shadow:0 0 0 4px rgba(212,175,55,0.28),0 6px 16px rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0B0B0D" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/>
-        <circle cx="7" cy="17" r="2"/>
-        <path d="M9 17h6"/>
-        <circle cx="17" cy="17" r="2"/>
-      </svg>
-    </div>`,
-    iconSize: [38, 38],
-    iconAnchor: [19, 19],
-    popupAnchor: [0, -18],
-  });
+function formatDistance(meters: number): string {
+  const feet = meters * 3.28084;
+  if (feet < 528) return `In ${Math.max(0, Math.round(feet / 10) * 10)} ft`;
+  return `In ${(meters / 1609.344).toFixed(1)} mi`;
+}
+
+function createCarElement(): HTMLDivElement {
+  const element = document.createElement('div');
+  element.className =
+    'flex h-11 w-11 items-center justify-center rounded-full text-[19px] font-black text-[#0b0b0d]';
+  element.style.cssText =
+    'background:linear-gradient(145deg,#fff1ad 0%,#d4af37 42%,#805d13 100%);border:2px solid #fff0ab;box-shadow:0 0 0 5px rgba(212,175,55,.24),0 5px 18px rgba(0,0,0,.85);';
+  element.setAttribute('aria-label', 'Live driver GPS location');
+  element.textContent = '▲';
+  return element;
+}
+
+function createPlaceElement(glyph: string, label: string): HTMLDivElement {
+  const element = document.createElement('div');
+  element.className =
+    'flex h-8 w-8 items-center justify-center rounded-full border-2 border-[#f5df9a] bg-[#b8860b] text-xs font-black text-[#0b0b0d] shadow-lg';
+  element.textContent = glyph;
+  element.title = label;
+  return element;
+}
+
+function upsertMarker(
+  map: Map,
+  markerRef: React.MutableRefObject<Marker | null>,
+  point: GeoPoint | null | undefined,
+  element: HTMLElement
+): void {
+  if (!point) {
+    markerRef.current?.remove();
+    markerRef.current = null;
+    return;
+  }
+  if (!markerRef.current) {
+    markerRef.current = new maplibregl.Marker({
+      element,
+      anchor: 'center',
+      rotationAlignment: 'map',
+      pitchAlignment: 'map',
+    })
+      .setLngLat([point.lng, point.lat])
+      .addTo(map);
+    return;
+  }
+  markerRef.current.setLngLat([point.lng, point.lat]);
 }
 
 export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
@@ -107,55 +155,92 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   gpsWatchActive = false,
   overlayContainerRef,
   heightClass = 'h-full',
+  showRecenterButton = true,
+  fullScreen = false,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const layerGroupRef = useRef<L.LayerGroup | null>(null);
-  const routeLayerRef = useRef<L.Polyline | null>(null);
+  const mapRef = useRef<Map | null>(null);
+  const carMarkerRef = useRef<Marker | null>(null);
+  const pickupMarkerRef = useRef<Marker | null>(null);
+  const dropoffMarkerRef = useRef<Marker | null>(null);
   const routeRequestRef = useRef<AbortController | null>(null);
-  const lastFitKeyRef = useRef<string>('');
   const routeOriginRef = useRef<(GeoPoint & {targetKey: string}) | null>(null);
-  const [watchedCoords, setWatchedCoords] = useState<GeoPoint | null>(null);
+  const spokenStepRef = useRef<string | null>(null);
+  const [mapReady, setMapReady] = useState(false);
+  const [watchedPosition, setWatchedPosition] = useState<WatchedPosition | null>(null);
   const [routeSteps, setRouteSteps] = useState<RouteStep[]>([]);
   const [routeCoordinates, setRouteCoordinates] = useState<[number, number][] | null>(null);
+  const [routeDistance, setRouteDistance] = useState<number | null>(null);
+  const [routeDuration, setRouteDuration] = useState<number | null>(null);
   const [stepIndex, setStepIndex] = useState(1);
   const [routeError, setRouteError] = useState<string | null>(null);
-  const currentCoords = watchedCoords || driverCoords || null;
+  const currentCoords = watchedPosition?.coords || driverCoords || null;
+  const heading = watchedPosition?.heading ?? null;
+  const isNavigating = Boolean(
+    targetCoords &&
+      (activeTripStage === 'en_route_pickup' ||
+        activeTripStage === 'en_route_stop1' ||
+        activeTripStage === 'in_progress')
+  );
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const defaultOkcCenter: [number, number] = [
-      pickup?.lat ?? 35.4668,
-      pickup?.lng ?? -97.5181,
-    ];
-
-    const map = L.map(containerRef.current, {
-      center: defaultOkcCenter,
-      zoom: 12,
-      zoomControl: true,
+    const map = new maplibregl.Map({
+      container: containerRef.current,
+      style: 'https://tiles.openfreemap.org/styles/liberty',
+      center: OKC_CENTER,
+      zoom: 11,
+      pitch: 0,
+      bearing: 0,
     });
-
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
-      subdomains: 'abcd',
-      maxZoom: 19,
-    }).addTo(map);
-
-    const group = L.layerGroup().addTo(map);
     mapRef.current = map;
-    layerGroupRef.current = group;
 
-    const resizeTimer = window.setTimeout(() => {
-      map.invalidateSize();
-    }, 180);
+    const handleLoad = () => {
+      if (!map.getSource(ROUTE_SOURCE_ID)) {
+        map.addSource(ROUTE_SOURCE_ID, {
+          type: 'geojson',
+          data: {type: 'FeatureCollection', features: []},
+        });
+        map.addLayer({
+          id: ROUTE_LAYER_IDS[0],
+          type: 'line',
+          source: ROUTE_SOURCE_ID,
+          layout: {'line-cap': 'round', 'line-join': 'round'},
+          paint: {
+            'line-color': '#f4d576',
+            'line-width': 16,
+            'line-blur': 9,
+            'line-opacity': 0.6,
+          },
+        });
+        map.addLayer({
+          id: ROUTE_LAYER_IDS[1],
+          type: 'line',
+          source: ROUTE_SOURCE_ID,
+          layout: {'line-cap': 'round', 'line-join': 'round'},
+          paint: {
+            'line-color': '#d4af37',
+            'line-width': 6,
+            'line-opacity': 0.98,
+          },
+        });
+      }
+      setMapReady(true);
+    };
+
+    map.on('load', handleLoad);
+    const resizeObserver = new ResizeObserver(() => map.resize());
+    resizeObserver.observe(containerRef.current);
 
     return () => {
-      window.clearTimeout(resizeTimer);
+      resizeObserver.disconnect();
+      map.off('load', handleLoad);
+      carMarkerRef.current?.remove();
+      pickupMarkerRef.current?.remove();
+      dropoffMarkerRef.current?.remove();
       map.remove();
       mapRef.current = null;
-      layerGroupRef.current = null;
-      routeLayerRef.current = null;
     };
   }, []);
 
@@ -165,15 +250,21 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
 
   useEffect(() => {
     if (!gpsWatchActive || !('geolocation' in navigator)) {
-      setWatchedCoords(null);
+      setWatchedPosition(null);
       return;
     }
 
     const watchId = navigator.geolocation.watchPosition(
       ({coords}) =>
-        setWatchedCoords({
-          lat: Number(coords.latitude.toFixed(6)),
-          lng: Number(coords.longitude.toFixed(6)),
+        setWatchedPosition({
+          coords: {
+            lat: Number(coords.latitude.toFixed(6)),
+            lng: Number(coords.longitude.toFixed(6)),
+          },
+          heading:
+            coords.heading !== null && Number.isFinite(coords.heading)
+              ? coords.heading
+              : null,
         }),
       (error) => {
         console.error('Dark radar GPS watch failed:', error.message);
@@ -186,89 +277,62 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
 
   useEffect(() => {
     const map = mapRef.current;
-    const group = layerGroupRef.current;
-    if (!map || !group) return;
-
-    group.clearLayers();
-    const boundsPoints: L.LatLngExpression[] = [];
-
-    if (pickup) {
-      const pMarker = L.marker([pickup.lat, pickup.lng], {
-        icon: createPinIcon('#C5A059', '#DFC07D', 'P'),
-      }).bindPopup(`<strong>Pickup</strong><br/>${pickupLabel}`);
-      pMarker.addTo(group);
-      boundsPoints.push([pickup.lat, pickup.lng]);
-    }
-
-    if (dropoff) {
-      const dMarker = L.marker([dropoff.lat, dropoff.lng], {
-        icon: createPinIcon('#B8860B', '#C5A059', 'D'),
-      }).bindPopup(`<strong>Drop-off</strong><br/>${dropoffLabel}`);
-      dMarker.addTo(group);
-      boundsPoints.push([dropoff.lat, dropoff.lng]);
-    }
-
-    if (currentCoords) {
-      const carMarker = L.marker([currentCoords.lat, currentCoords.lng], {
-        icon: createDriverCarIcon(),
-        zIndexOffset: 500,
-      }).bindPopup(`<strong>${driverLabel}</strong><br/>Live Phone GPS Telemetry`);
-      carMarker.addTo(group);
-      boundsPoints.push([currentCoords.lat, currentCoords.lng]);
-    }
-
-    if (userGps) {
-      const gpsCircle = L.circleMarker([userGps.lat, userGps.lng], {
-        radius: 7,
-        color: '#DFC07D',
-        weight: 2,
-        fillColor: '#C5A059',
-        fillOpacity: 0.95,
-      }).bindPopup('<strong>Phone Native GPS</strong><br/>HTML5 Geolocation Active');
-      gpsCircle.addTo(group);
-      boundsPoints.push([userGps.lat, userGps.lng]);
-    }
-
-    const fitKey = `${pickup?.lat ?? ''},${pickup?.lng ?? ''}-${dropoff?.lat ?? ''},${dropoff?.lng ?? ''}-${Boolean(currentCoords)}`;
-    if (boundsPoints.length >= 2 && lastFitKeyRef.current !== fitKey) {
-      lastFitKeyRef.current = fitKey;
-      map.fitBounds(L.latLngBounds(boundsPoints), {padding: [38, 38], maxZoom: 14});
-    } else if (boundsPoints.length === 1 && lastFitKeyRef.current !== fitKey) {
-      lastFitKeyRef.current = fitKey;
-      map.setView(boundsPoints[0], 13);
-    }
-  }, [pickup, pickupLabel, dropoff, dropoffLabel, currentCoords, driverLabel, userGps]);
+    if (!map || !mapReady) return;
+    const pickupElement = createPlaceElement('P', pickupLabel);
+    const dropoffElement = createPlaceElement('D', dropoffLabel);
+    upsertMarker(map, pickupMarkerRef, pickup, pickupElement);
+    upsertMarker(map, dropoffMarkerRef, dropoff, dropoffElement);
+  }, [mapReady, pickup, pickupLabel, dropoff, dropoffLabel]);
 
   useEffect(() => {
-    if (!targetCoords || !currentCoords) {
+    const map = mapRef.current;
+    if (!map || !mapReady || !currentCoords) return;
+    const carElement = createCarElement();
+    upsertMarker(map, carMarkerRef, currentCoords, carElement);
+    carMarkerRef.current?.setRotation(heading ?? 0);
+
+    if (isNavigating) {
+      map.easeTo({
+        center: [currentCoords.lng, currentCoords.lat],
+        zoom: 17.5,
+        pitch: 62,
+        bearing: heading ?? map.getBearing(),
+        duration: 700,
+      });
+    } else {
+      map.easeTo({
+        center: [currentCoords.lng, currentCoords.lat],
+        zoom: Math.max(map.getZoom(), 14),
+        pitch: 0,
+        bearing: 0,
+        duration: 500,
+      });
+    }
+  }, [mapReady, currentCoords, heading, isNavigating]);
+
+  useEffect(() => {
+    if (!targetCoords || !currentCoords || !activeTripStage) {
       routeRequestRef.current?.abort();
       routeRequestRef.current = null;
       routeOriginRef.current = null;
       setRouteSteps([]);
       setRouteCoordinates(null);
+      setRouteDistance(null);
+      setRouteDuration(null);
       setStepIndex(1);
       setRouteError(null);
-      routeLayerRef.current?.remove();
-      routeLayerRef.current = null;
+      spokenStepRef.current = null;
       return;
     }
 
     const previousOrigin = routeOriginRef.current;
     const targetKey = `${targetCoords.lat},${targetCoords.lng}`;
     const sameTarget = previousOrigin && previousOrigin.targetKey === targetKey;
-    if (
-      sameTarget &&
-      distanceMeters(previousOrigin, currentCoords) < 300
-    ) {
-      return;
-    }
+    if (sameTarget && distanceMeters(previousOrigin, currentCoords) < 300) return;
 
     const origin = currentCoords;
     routeRequestRef.current?.abort();
-    routeOriginRef.current = {
-      ...origin,
-      targetKey,
-    };
+    routeOriginRef.current = {...origin, targetKey};
     const controller = new AbortController();
     routeRequestRef.current = controller;
     const routeUrl =
@@ -287,7 +351,9 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
         }
         setRouteSteps(route.legs[0].steps);
         setRouteCoordinates(route.geometry.coordinates);
-        setStepIndex(Math.min(1, route.legs[0].steps.length - 1));
+        setRouteDistance(route.distance);
+        setRouteDuration(route.duration);
+        setStepIndex((current) => Math.min(current, route.legs[0].steps.length - 1));
         setRouteError(null);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -299,17 +365,26 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
     };
 
     void fetchRoute();
-  }, [targetCoords, currentCoords]);
+  }, [targetCoords, currentCoords, activeTripStage]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !routeCoordinates) return;
-    routeLayerRef.current?.remove();
-    routeLayerRef.current = L.polyline(
-      routeCoordinates.map(([lng, lat]): L.LatLngExpression => [lat, lng]),
-      {color: '#D4AF37', weight: 5, opacity: 0.9}
-    ).addTo(map);
-  }, [routeCoordinates]);
+    if (!map || !mapReady) return;
+    const source = map.getSource(ROUTE_SOURCE_ID) as GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(
+      routeCoordinates
+        ? {
+            type: 'Feature',
+            properties: {},
+            geometry: {type: 'LineString', coordinates: routeCoordinates},
+          }
+        : {type: 'FeatureCollection', features: []}
+    );
+    ROUTE_LAYER_IDS.forEach((id) => {
+      if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', routeCoordinates ? 'visible' : 'none');
+    });
+  }, [mapReady, routeCoordinates]);
 
   useEffect(() => {
     if (!currentCoords || stepIndex >= routeSteps.length - 1) return;
@@ -322,55 +397,135 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   }, [currentCoords, routeSteps, stepIndex]);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !currentCoords) return;
-    map.setView([currentCoords.lat, currentCoords.lng], Math.max(map.getZoom(), 15), {
-      animate: true,
-    });
-  }, [currentCoords]);
-
-  useEffect(() => {
-    if (!routeSteps.length || !window.speechSynthesis) return;
+    if (!('speechSynthesis' in window)) return;
+    if (!isNavigating) {
+      if (spokenStepRef.current) {
+        window.speechSynthesis.cancel();
+        spokenStepRef.current = null;
+      }
+      return;
+    }
+    if (!routeSteps.length) return;
     const step = routeSteps[stepIndex];
     if (!step) return;
+    const key = `${step.maneuver.type}:${step.maneuver.modifier || ''}:${step.name}:${step.maneuver.location.join(',')}`;
+    if (spokenStepRef.current === key) return;
+    if (spokenStepRef.current) window.speechSynthesis.cancel();
+    spokenStepRef.current = key;
     const utterance = new SpeechSynthesisUtterance(describeTurn(step));
-    window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utterance);
-    return () => window.speechSynthesis.cancel();
-  }, [routeSteps, stepIndex]);
+  }, [isNavigating, routeSteps, stepIndex]);
 
   const nextStep = routeSteps[stepIndex];
-  const nextTurnDistance = nextStep && currentCoords
-    ? Math.max(0, Math.round(distanceMeters(currentCoords, {
-        lat: nextStep.maneuver.location[1],
-        lng: nextStep.maneuver.location[0],
-      })))
-    : null;
+  const nextTurnDistance =
+    nextStep && currentCoords
+      ? distanceMeters(currentCoords, {
+          lat: nextStep.maneuver.location[1],
+          lng: nextStep.maneuver.location[0],
+        })
+      : null;
+  const remainingMiles = routeDistance === null ? null : routeDistance / 1609.344;
+  const etaMinutes = routeDuration === null ? null : Math.max(1, Math.round(routeDuration / 60));
+  const arrivalTime =
+    etaMinutes === null
+      ? null
+      : new Date(Date.now() + etaMinutes * 60_000).toLocaleTimeString([], {
+          hour: 'numeric',
+          minute: '2-digit',
+        });
+  const bottomOverlayPosition = fullScreen
+    ? 'bottom-[calc(60%+0.75rem)]'
+    : 'bottom-3';
 
   return (
-    <div className="relative h-[300px] w-full overflow-hidden rounded-2xl border border-[#D4AF37] bg-[#0B0B0D]">
-      <div ref={containerRef} className={`w-full ${heightClass} z-0`} />
+    <div className={`relative w-full overflow-hidden bg-[#0B0B0D] ${heightClass}`}>
+      <div ref={containerRef} className="absolute inset-0 z-0" />
       <div
         ref={overlayContainerRef}
-        className="pointer-events-none absolute inset-0 z-20"
+        className="pointer-events-none absolute inset-0 z-40"
       />
-      {activeTripStage && targetCoords && (
-        <div className="absolute top-3 left-3 right-3 z-10 rounded-lg border border-[#D4AF37]/70 bg-[#0B0B0D]/95 px-3 py-2 text-[#DFC07D] shadow-lg">
-          <div className="text-[9px] font-bold uppercase tracking-[0.14em] text-[#D4AF37]">
-            Next turn · {activeTripStage.replaceAll('_', ' ')} · {targetLabel}
+      {showRecenterButton && (
+        <button
+          type="button"
+          aria-label="Re-center map"
+          title="Re-center"
+          onClick={() => {
+            const map = mapRef.current;
+            if (!map) return;
+            const center = currentCoords
+              ? [currentCoords.lng, currentCoords.lat] as [number, number]
+              : OKC_CENTER;
+            map.easeTo({
+              center,
+              zoom: isNavigating ? 17.5 : 14,
+              pitch: isNavigating ? 62 : 0,
+              bearing: isNavigating ? heading ?? map.getBearing() : 0,
+              duration: 500,
+            });
+          }}
+          className="absolute bottom-[calc(60%+0.75rem)] right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-[#DFC07D] bg-[#0B0B0D]/95 text-[#DFC07D] shadow-[0_0_16px_rgba(212,175,55,0.3)] backdrop-blur-md"
+        >
+          <span className="text-xl" aria-hidden="true">◎</span>
+        </button>
+      )}
+      {isNavigating && (
+        <>
+          <div
+            className={`absolute left-3 right-3 z-10 flex min-h-16 items-center gap-3 rounded-xl border border-[#D4AF37]/70 bg-[#0B0B0D]/95 px-3 py-2 text-[#DFC07D] shadow-xl backdrop-blur-md ${
+              fullScreen ? 'top-20' : 'top-3'
+            }`}
+          >
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[#d4af37] text-3xl font-bold leading-none text-[#0b0b0d]">
+              {turnArrow(nextStep)}
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-extrabold uppercase tracking-wider text-[#f5df9a]">
+                {routeError
+                  ? 'Route guidance unavailable'
+                  : nextTurnDistance === null
+                  ? 'Loading route...'
+                  : formatDistance(nextTurnDistance)}
+              </div>
+              <div className="truncate text-sm font-bold">
+                {nextStep ? describeTurn(nextStep) : targetLabel}
+              </div>
+            </div>
           </div>
-          <div className="text-sm font-bold">
-            {routeError
-              ? 'Route guidance unavailable'
-              : nextStep
-              ? `${describeTurn(nextStep)}${nextTurnDistance === null ? '' : ` · ${nextTurnDistance} m`}`
-              : 'Loading route guidance...'}
+          <div
+            className={`absolute ${bottomOverlayPosition} left-3 right-20 z-10 grid grid-cols-3 divide-x divide-[#d4af37]/30 rounded-xl border border-[#D4AF37]/60 bg-[#0B0B0D]/95 px-2 py-2 text-center text-[#DFC07D] shadow-xl backdrop-blur-md`}
+          >
+            <div>
+              <div className="text-base font-extrabold tabular-nums">
+                {etaMinutes === null ? '--' : `${etaMinutes} min`}
+              </div>
+              <div className="text-[9px] font-bold uppercase tracking-widest text-[#c5a059]">
+                ETA
+              </div>
+            </div>
+            <div>
+              <div className="text-base font-extrabold tabular-nums">
+                {remainingMiles === null ? '--' : `${remainingMiles.toFixed(1)} mi`}
+              </div>
+              <div className="text-[9px] font-bold uppercase tracking-widest text-[#c5a059]">
+                Miles
+              </div>
+            </div>
+            <div>
+              <div className="text-base font-extrabold tabular-nums">
+                {arrivalTime ?? '--'}
+              </div>
+              <div className="text-[9px] font-bold uppercase tracking-widest text-[#c5a059]">
+                Arrival
+              </div>
+            </div>
           </div>
+        </>
+      )}
+      {!isNavigating && (
+        <div className="pointer-events-none absolute bottom-3 right-3 z-10 rounded-lg border border-[#C5A059]/30 bg-[#0B0B0D]/90 px-2.5 py-1 text-[11px] font-mono tabular-nums text-[#C5A059] backdrop-blur-md">
+          OKC · Live GPS
         </div>
       )}
-      <div className="pointer-events-none absolute bottom-3 right-3 z-10 rounded-lg bg-[#0B0B0D]/90 backdrop-blur-md border border-[#C5A059]/30 px-2.5 py-1 text-[11px] font-mono tabular-nums text-[#C5A059]">
-        OKC Dark Radar · $0 Native GPS
-      </div>
     </div>
   );
 };
