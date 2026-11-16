@@ -1,6 +1,6 @@
-import React, {useEffect, useRef} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import L from 'leaflet';
-import {GeoPoint} from '../types/rideapp';
+import {ActiveTripStage, GeoPoint} from '../types/rideapp';
 
 interface DarkRadarMapProps {
   pickup?: GeoPoint;
@@ -10,7 +10,60 @@ interface DarkRadarMapProps {
   driverCoords?: GeoPoint;
   driverLabel?: string;
   userGps?: GeoPoint | null;
+  activeTripStage?: ActiveTripStage;
+  targetCoords?: GeoPoint | null;
+  targetLabel?: string;
+  gpsWatchActive?: boolean;
+  overlayContainerRef?: React.Ref<HTMLDivElement>;
   heightClass?: string;
+}
+
+interface RouteStep {
+  distance: number;
+  name: string;
+  maneuver: {
+    location: [number, number];
+    type: string;
+    modifier?: string;
+  };
+}
+
+interface OsrmRouteResponse {
+  code: string;
+  routes?: Array<{
+    geometry: {coordinates: [number, number][]};
+    legs: Array<{steps: RouteStep[]}>;
+  }>;
+}
+
+function distanceMeters(from: GeoPoint, to: GeoPoint): number {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+  const latDelta = toRadians(to.lat - from.lat);
+  const lngDelta = toRadians(to.lng - from.lng);
+  const a =
+    Math.sin(latDelta / 2) ** 2 +
+    Math.cos(toRadians(from.lat)) *
+      Math.cos(toRadians(to.lat)) *
+      Math.sin(lngDelta / 2) ** 2;
+  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function describeTurn(step: RouteStep): string {
+  const {type, modifier} = step.maneuver;
+  if (type === 'arrive') return 'You have arrived';
+  if (type === 'depart') return step.name ? `Head toward ${step.name}` : 'Start driving';
+  const action =
+    type === 'turn' || type === 'end of road'
+      ? `Turn ${modifier || ''}`.trim()
+      : type === 'roundabout' || type === 'rotary'
+      ? 'Enter the roundabout'
+      : type === 'merge'
+      ? `Merge ${modifier || ''}`.trim()
+      : type === 'fork'
+      ? `Keep ${modifier || 'straight'}`
+      : 'Continue';
+  return step.name ? `${action} onto ${step.name}` : action;
 }
 
 function createPinIcon(bgHex: string, ringHex: string, glyph: string): L.DivIcon {
@@ -48,12 +101,26 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   driverCoords,
   driverLabel = 'Co-op Driver Live GPS',
   userGps,
-  heightClass = 'h-[280px] sm:h-[340px]',
+  activeTripStage,
+  targetCoords,
+  targetLabel = 'Trip destination',
+  gpsWatchActive = false,
+  overlayContainerRef,
+  heightClass = 'h-full',
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
+  const routeLayerRef = useRef<L.Polyline | null>(null);
+  const routeRequestRef = useRef<AbortController | null>(null);
   const lastFitKeyRef = useRef<string>('');
+  const routeOriginRef = useRef<(GeoPoint & {targetKey: string}) | null>(null);
+  const [watchedCoords, setWatchedCoords] = useState<GeoPoint | null>(null);
+  const [routeSteps, setRouteSteps] = useState<RouteStep[]>([]);
+  const [routeCoordinates, setRouteCoordinates] = useState<[number, number][] | null>(null);
+  const [stepIndex, setStepIndex] = useState(1);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const currentCoords = watchedCoords || driverCoords || null;
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -88,8 +155,34 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       map.remove();
       mapRef.current = null;
       layerGroupRef.current = null;
+      routeLayerRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    return () => routeRequestRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!gpsWatchActive || !('geolocation' in navigator)) {
+      setWatchedCoords(null);
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      ({coords}) =>
+        setWatchedCoords({
+          lat: Number(coords.latitude.toFixed(6)),
+          lng: Number(coords.longitude.toFixed(6)),
+        }),
+      (error) => {
+        console.error('Dark radar GPS watch failed:', error.message);
+      },
+      {enableHighAccuracy: true, maximumAge: 5000}
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [gpsWatchActive]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -115,42 +208,13 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       boundsPoints.push([dropoff.lat, dropoff.lng]);
     }
 
-    if (pickup && dropoff) {
-      L.polyline(
-        [
-          [pickup.lat, pickup.lng],
-          [dropoff.lat, dropoff.lng],
-        ],
-        {
-          color: '#C5A059',
-          weight: 3,
-          opacity: 0.78,
-          dashArray: '7 7',
-        }
-      ).addTo(group);
-    }
-
-    if (driverCoords) {
-      const carMarker = L.marker([driverCoords.lat, driverCoords.lng], {
+    if (currentCoords) {
+      const carMarker = L.marker([currentCoords.lat, currentCoords.lng], {
         icon: createDriverCarIcon(),
         zIndexOffset: 500,
       }).bindPopup(`<strong>${driverLabel}</strong><br/>Live Phone GPS Telemetry`);
       carMarker.addTo(group);
-      boundsPoints.push([driverCoords.lat, driverCoords.lng]);
-
-      if (pickup) {
-        L.polyline(
-          [
-            [driverCoords.lat, driverCoords.lng],
-            [pickup.lat, pickup.lng],
-          ],
-          {
-            color: '#DFC07D',
-            weight: 3.5,
-            opacity: 0.92,
-          }
-        ).addTo(group);
-      }
+      boundsPoints.push([currentCoords.lat, currentCoords.lng]);
     }
 
     if (userGps) {
@@ -165,7 +229,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       boundsPoints.push([userGps.lat, userGps.lng]);
     }
 
-    const fitKey = `${pickup?.lat ?? ''},${pickup?.lng ?? ''}-${dropoff?.lat ?? ''},${dropoff?.lng ?? ''}-${Boolean(driverCoords)}`;
+    const fitKey = `${pickup?.lat ?? ''},${pickup?.lng ?? ''}-${dropoff?.lat ?? ''},${dropoff?.lng ?? ''}-${Boolean(currentCoords)}`;
     if (boundsPoints.length >= 2 && lastFitKeyRef.current !== fitKey) {
       lastFitKeyRef.current = fitKey;
       map.fitBounds(L.latLngBounds(boundsPoints), {padding: [38, 38], maxZoom: 14});
@@ -173,12 +237,138 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       lastFitKeyRef.current = fitKey;
       map.setView(boundsPoints[0], 13);
     }
-  }, [pickup, pickupLabel, dropoff, dropoffLabel, driverCoords, driverLabel, userGps]);
+  }, [pickup, pickupLabel, dropoff, dropoffLabel, currentCoords, driverLabel, userGps]);
+
+  useEffect(() => {
+    if (!targetCoords || !currentCoords) {
+      routeRequestRef.current?.abort();
+      routeRequestRef.current = null;
+      routeOriginRef.current = null;
+      setRouteSteps([]);
+      setRouteCoordinates(null);
+      setStepIndex(1);
+      setRouteError(null);
+      routeLayerRef.current?.remove();
+      routeLayerRef.current = null;
+      return;
+    }
+
+    const previousOrigin = routeOriginRef.current;
+    const targetKey = `${targetCoords.lat},${targetCoords.lng}`;
+    const sameTarget = previousOrigin && previousOrigin.targetKey === targetKey;
+    if (
+      sameTarget &&
+      distanceMeters(previousOrigin, currentCoords) < 300
+    ) {
+      return;
+    }
+
+    const origin = currentCoords;
+    routeRequestRef.current?.abort();
+    routeOriginRef.current = {
+      ...origin,
+      targetKey,
+    };
+    const controller = new AbortController();
+    routeRequestRef.current = controller;
+    const routeUrl =
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${origin.lng},${origin.lat};${targetCoords.lng},${targetCoords.lat}` +
+      '?steps=true&overview=full&geometries=geojson';
+
+    const fetchRoute = async () => {
+      try {
+        const response = await fetch(routeUrl, {signal: controller.signal});
+        if (!response.ok) throw new Error(`OSRM returned HTTP ${response.status}`);
+        const data = (await response.json()) as OsrmRouteResponse;
+        const route = data.routes?.[0];
+        if (data.code !== 'Ok' || !route || !route.legs[0]?.steps.length) {
+          throw new Error(`OSRM could not find a route (${data.code})`);
+        }
+        setRouteSteps(route.legs[0].steps);
+        setRouteCoordinates(route.geometry.coordinates);
+        setStepIndex(Math.min(1, route.legs[0].steps.length - 1));
+        setRouteError(null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setRouteError(error instanceof Error ? error.message : 'Unable to load route');
+        console.error('Dark radar route request failed:', error);
+      } finally {
+        if (routeRequestRef.current === controller) routeRequestRef.current = null;
+      }
+    };
+
+    void fetchRoute();
+  }, [targetCoords, currentCoords]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !routeCoordinates) return;
+    routeLayerRef.current?.remove();
+    routeLayerRef.current = L.polyline(
+      routeCoordinates.map(([lng, lat]): L.LatLngExpression => [lat, lng]),
+      {color: '#D4AF37', weight: 5, opacity: 0.9}
+    ).addTo(map);
+  }, [routeCoordinates]);
+
+  useEffect(() => {
+    if (!currentCoords || stepIndex >= routeSteps.length - 1) return;
+    const nextStep = routeSteps[stepIndex];
+    if (!nextStep) return;
+    const [lng, lat] = nextStep.maneuver.location;
+    if (distanceMeters(currentCoords, {lat, lng}) < 45) {
+      setStepIndex((current) => Math.min(current + 1, routeSteps.length - 1));
+    }
+  }, [currentCoords, routeSteps, stepIndex]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !currentCoords) return;
+    map.setView([currentCoords.lat, currentCoords.lng], Math.max(map.getZoom(), 15), {
+      animate: true,
+    });
+  }, [currentCoords]);
+
+  useEffect(() => {
+    if (!routeSteps.length || !window.speechSynthesis) return;
+    const step = routeSteps[stepIndex];
+    if (!step) return;
+    const utterance = new SpeechSynthesisUtterance(describeTurn(step));
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+    return () => window.speechSynthesis.cancel();
+  }, [routeSteps, stepIndex]);
+
+  const nextStep = routeSteps[stepIndex];
+  const nextTurnDistance = nextStep && currentCoords
+    ? Math.max(0, Math.round(distanceMeters(currentCoords, {
+        lat: nextStep.maneuver.location[1],
+        lng: nextStep.maneuver.location[0],
+      })))
+    : null;
 
   return (
-    <div className="relative w-full overflow-hidden rounded-2xl border border-[#C5A059]/30 bg-[#0B0B0D]">
+    <div className="relative h-[300px] w-full overflow-hidden rounded-2xl border border-[#D4AF37] bg-[#0B0B0D]">
       <div ref={containerRef} className={`w-full ${heightClass} z-0`} />
-      <div className="pointer-events-none absolute top-3 right-3 z-10 rounded-lg bg-[#0B0B0D]/90 backdrop-blur-md border border-[#C5A059]/30 px-2.5 py-1 text-[11px] font-mono tabular-nums text-[#C5A059]">
+      <div
+        ref={overlayContainerRef}
+        className="pointer-events-none absolute inset-0 z-20"
+      />
+      {activeTripStage && targetCoords && (
+        <div className="absolute top-3 left-3 right-3 z-10 rounded-lg border border-[#D4AF37]/70 bg-[#0B0B0D]/95 px-3 py-2 text-[#DFC07D] shadow-lg">
+          <div className="text-[9px] font-bold uppercase tracking-[0.14em] text-[#D4AF37]">
+            Next turn · {activeTripStage.replaceAll('_', ' ')} · {targetLabel}
+          </div>
+          <div className="text-sm font-bold">
+            {routeError
+              ? 'Route guidance unavailable'
+              : nextStep
+              ? `${describeTurn(nextStep)}${nextTurnDistance === null ? '' : ` · ${nextTurnDistance} m`}`
+              : 'Loading route guidance...'}
+          </div>
+        </div>
+      )}
+      <div className="pointer-events-none absolute bottom-3 right-3 z-10 rounded-lg bg-[#0B0B0D]/90 backdrop-blur-md border border-[#C5A059]/30 px-2.5 py-1 text-[11px] font-mono tabular-nums text-[#C5A059]">
         OKC Dark Radar · $0 Native GPS
       </div>
     </div>

@@ -1,4 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {createPortal} from 'react-dom';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -58,6 +59,7 @@ import {
   isPointInsideOklahoma,
   parseScheduleTimestamp,
 } from '../utils/oklahomaGeo';
+import {DarkRadarMap} from './DarkRadarMap';
 
 interface DriverDashboardProps {
   user: UserAccount;
@@ -72,7 +74,7 @@ type DriverTab = 'home' | 'earnings' | 'profile' | 'support';
 type EarningsTimeframe = 'daily' | 'weekly' | 'monthly' | 'yearly';
 type MapAppChoice = 'appleMaps' | 'googleMaps' | 'waze';
 
-const OFFER_DURATION_SECONDS = 10;
+const OFFER_DURATION_SECONDS = 5;
 const FREE_WAIT_LIMIT_SECONDS = 300; // 05:00 free wait / Stop 1 limit
 const EXTRA_WAIT_RATE_PER_MIN = 0.2;
 
@@ -267,6 +269,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   const [activeOfferId, setActiveOfferId] = useState<string | null>(null);
   const [offerSecondsLeft, setOfferSecondsLeft] = useState<number>(OFFER_DURATION_SECONDS);
   const [dismissedOfferIds, setDismissedOfferIds] = useState<string[]>([]);
+  const [mapOfferOverlay, setMapOfferOverlay] = useState<HTMLDivElement | null>(null);
 
   // Active Trip Sheet visibility + Wait Timer + In-App Chat Drawer + Call Notice + Rating Modal
   const [isTripSheetOpen, setIsTripSheetOpen] = useState<boolean>(Boolean(activeAcceptedRide));
@@ -391,7 +394,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     });
   }, [liveGps.lat, liveGps.lng]);
 
-  // Separate Scheduled Reservations Feed vs. 10-Second Instant Ride Offers
+  // Separate Scheduled Reservations Feed vs. 5-Second Instant Ride Offers
   const instantPendingRides = useMemo(
     () => incomingPendingRides.filter((r) => r.bookingMode === 'instant'),
     [incomingPendingRides]
@@ -402,7 +405,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     [incomingPendingRides]
   );
 
-  // Auto-open 10-Second Instant Ride Pop-Up when ONLINE with an eligible instant ride
+  // Auto-open 5-Second Instant Ride Offer when ONLINE with an eligible instant ride
   const currentOfferRide = useMemo(() => {
     if (!isOnline || activeAcceptedRide) return null;
     if (activeOfferId) {
@@ -422,7 +425,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     }
   }, [currentOfferRide, activeOfferId]);
 
-  // Glowing 10-Second Gold Countdown Timer for Instant Ride Offer Pop-Up
+  // Glowing 5-Second Gold Countdown Timer for Instant Ride Offer
   useEffect(() => {
     if (!currentOfferRide) return;
     const timer = window.setInterval(() => {
@@ -431,7 +434,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     return () => window.clearInterval(timer);
   }, [currentOfferRide?.id]);
 
-  // Auto-decline and pass to next closest Oklahoma driver when 10s timer hits 0
+  // Auto-decline and pass to next closest Oklahoma driver when the timer hits 0
   useEffect(() => {
     if (!currentOfferRide || offerSecondsLeft > 0) return;
     setDismissedOfferIds((prev) =>
@@ -445,7 +448,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
         : [...currentOfferRide.declinedByDriverIds, user.id],
       driverQueueIndex: (currentOfferRide.driverQueueIndex ?? 0) + 1,
     });
-    showTemporaryToast('10s instant offer expired — passed to next closest Oklahoma driver.');
+    showTemporaryToast('5s instant offer expired — passed to next closest Oklahoma driver.');
   }, [offerSecondsLeft, currentOfferRide, user.id, onUpdateReservation]);
 
   // Pickup & Stop 1 Wait Timer when Stage === 'arrived_pickup' or 'arrived_stop1'
@@ -1576,6 +1579,45 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       </header>
 
       <main className="max-w-3xl mx-auto px-3.5 sm:px-5 pt-3 flex flex-col gap-3">
+        <div>
+          <DarkRadarMap
+            pickup={activeAcceptedRide?.pickupCoords}
+            pickupLabel={activeAcceptedRide?.pickupAddress}
+            dropoff={activeAcceptedRide?.dropoffCoords}
+            dropoffLabel={activeAcceptedRide?.dropoffAddress}
+            driverCoords={liveGps}
+            userGps={liveGps}
+            activeTripStage={activeAcceptedRide ? activeTripStage : undefined}
+            targetCoords={activeAcceptedRide ? activeTargetCoords : null}
+            targetLabel={activeTargetAddress || undefined}
+            gpsWatchActive={gpsWatchActive}
+            overlayContainerRef={setMapOfferOverlay}
+          />
+
+          {activeTab === 'home' && !currentOfferRide && !activeAcceptedRide && (
+            <div className="flex justify-center pt-3">
+              <button
+                type="button"
+                onClick={handleToggleOnline}
+                aria-pressed={isOnline}
+                className={`h-auto py-3 px-8 rounded-full text-sm font-extrabold tracking-[0.18em] uppercase flex items-center justify-center gap-2.5 cursor-pointer transition-all active:scale-[0.98] ${
+                  isOnline
+                    ? 'bg-[#020612]/72 backdrop-blur-[10px] border-2 border-[#DFC07D] text-[#DFC07D] shadow-[0_8px_28px_rgba(0,0,0,0.92)] hover:bg-[#C5A059]/15'
+                    : 'btn-gold-luxury shadow-[0_8px_28px_rgba(212,175,55,0.38)]'
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-[#0B0B0D]'
+                  }`}
+                />
+                <span>{isOnline ? 'GO OFFLINE' : 'GO ONLINE'}</span>
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Subtle Success Notifications */}
         {(cashOutSuccessToast || taxDownloadToast || actionToast) && (
           <div className="rounded-xl border border-[#DFC07D]/60 bg-[#C5A059]/15 px-4 py-3 text-xs font-semibold text-[#DFC07D] flex items-center justify-between gap-2">
@@ -2035,7 +2077,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
               </section>
             ) : (
               <>
-                {/* MIDDLE WORKSPACE: Dispatch Toolbar + Simulate 10-Sec Instant Ride */}
+                {/* MIDDLE WORKSPACE: Dispatch Toolbar + Simulate Instant Ride */}
                 <section className="obsidian-login-card rounded-xl p-4 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2.5">
                     <div className="min-w-0">
@@ -2060,7 +2102,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                       className="btn-gold-luxury h-9 px-3.5 rounded-lg text-[11px] font-bold tracking-wider uppercase inline-flex items-center gap-1.5 cursor-pointer transition-transform active:scale-[0.98]"
                     >
                       <Sparkles className="w-3.5 h-3.5" />
-                      <span>Simulate 10-Sec Instant Ride</span>
+                      <span>Simulate Instant Ride</span>
                     </button>
                   </div>
                 </section>
@@ -2084,7 +2126,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                         onClick={handleSpawnSampleDispatch}
                         className="btn-gold-luxury h-10 px-5 rounded-lg text-xs uppercase tracking-wider cursor-pointer"
                       >
-                        Simulate 10-Sec Instant Ride
+                        Simulate Instant Ride
                       </button>
                     </div>
                   ) : (
@@ -3222,17 +3264,17 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       </main>
 
       {/* ================================================================== */}
-      {/* 10-SECOND INSTANT RIDE OFFER POP-UP (UBER STYLE WITH SHRINKING BAR) */}
+      {/* 5-SECOND INSTANT RIDE OFFER OVERLAY ON THE MAP */}
       {/* ================================================================== */}
-      {currentOfferRide && !activeAcceptedRide && (
+      {currentOfferRide && !activeAcceptedRide && mapOfferOverlay && createPortal(
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="10-Second Instant Ride Offer"
-          className="fixed inset-x-0 bottom-16 z-40 px-3 pb-3 sm:px-6 flex justify-center pointer-events-none"
+          aria-label="5-Second Instant Ride Offer"
+          className="absolute inset-0 z-20 overflow-y-auto bg-[#020612]/95 p-2 pointer-events-auto"
         >
-          <div className="pointer-events-auto w-full max-w-lg obsidian-login-card rounded-2xl border-2 border-[#DFC07D] shadow-[0_-10px_40px_rgba(0,0,0,0.95)] overflow-hidden">
-            {/* Live 10-Second Shrinking Gold Countdown Bar */}
+          <div className="w-full min-h-full max-w-lg mx-auto obsidian-login-card rounded-2xl border-2 border-[#DFC07D] shadow-[0_-10px_40px_rgba(0,0,0,0.95)] overflow-hidden">
+            {/* Live 5-Second Shrinking Gold Countdown Bar */}
             <div className="h-2.5 w-full bg-[#020612]/72 backdrop-blur-[10px] overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-[#8A6D3B] via-[#DFC07D] to-[#FFF2CC] shadow-[0_0_12px_rgba(223,192,125,0.85)] transition-all duration-1000 ease-linear"
@@ -3247,7 +3289,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                 <div>
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded border border-[#DFC07D]/70 bg-[#C5A059]/15 text-[10px] font-bold tracking-[0.14em] uppercase text-[#DFC07D]">
                     <Sparkles className="w-3 h-3" />
-                    <span>INSTANT OKLAHOMA RIDE OFFER</span>
+                    <span>INSTANT OKLAHOMA RIDE · {offerSecondsLeft}s TO ACCEPT</span>
                   </div>
                   <div className="mt-1.5 flex items-center gap-2">
                     <span className="text-sm font-bold text-[#DFC07D]">
@@ -3362,33 +3404,8 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
               </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* ================================================================== */}
-      {/* BOTTOM GO ONLINE / GO OFFLINE PILL DIRECTLY ABOVE BOTTOM NAV BAR   */}
-      {/* ================================================================== */}
-      {activeTab === 'home' && !currentOfferRide && !activeAcceptedRide && (
-        <div className="fixed inset-x-0 bottom-[70px] z-30 px-4 flex justify-center pointer-events-none">
-          <button
-            type="button"
-            onClick={handleToggleOnline}
-            aria-pressed={isOnline}
-            className={`pointer-events-auto h-auto py-3 px-8 rounded-full text-sm font-extrabold tracking-[0.18em] uppercase flex items-center justify-center gap-2.5 cursor-pointer transition-all active:scale-[0.98] ${
-              isOnline
-                ? 'bg-[#020612]/72 backdrop-blur-[10px] border-2 border-[#DFC07D] text-[#DFC07D] shadow-[0_8px_28px_rgba(0,0,0,0.92)] hover:bg-[#C5A059]/15'
-                : 'btn-gold-luxury shadow-[0_8px_28px_rgba(212,175,55,0.38)]'
-            }`}
-          >
-            <span
-              aria-hidden="true"
-              className={`w-2.5 h-2.5 rounded-full ${
-                isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-[#0B0B0D]'
-              }`}
-            />
-            <span>{isOnline ? 'GO OFFLINE' : 'GO ONLINE'}</span>
-          </button>
-        </div>
+        </div>,
+        mapOfferOverlay
       )}
 
       {/* ================================================================== */}
