@@ -1,7 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
-import * as maplibregl from 'maplibre-gl';
-import type {GeoJSONSource, Map, Marker} from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {ActiveTripStage, GeoPoint} from '../types/rideapp';
 
 interface DarkRadarMapProps {
@@ -26,15 +25,17 @@ interface DarkRadarMapProps {
   fullScreen?: boolean;
 }
 
+type RouteCoordinate = [number, number];
+
 interface RouteStep {
   distance: number;
   name: string;
   maneuver: {
-    location: [number, number];
+    location: RouteCoordinate;
     type: string;
     modifier?: string;
   };
-  geometry?: {coordinates: [number, number][]};
+  geometry?: {coordinates: RouteCoordinate[]};
 }
 
 interface OsrmRouteResponse {
@@ -42,7 +43,7 @@ interface OsrmRouteResponse {
   routes?: Array<{
     distance: number;
     duration: number;
-    geometry: {coordinates: [number, number][]};
+    geometry: {coordinates: RouteCoordinate[]};
     legs: Array<{steps: RouteStep[]}>;
   }>;
 }
@@ -52,21 +53,19 @@ interface WatchedPosition {
   heading: number | null;
 }
 
-const OKC_CENTER: [number, number] = [-97.5164, 35.4676];
-const ROUTE_SOURCE_ID = 'driver-route';
-const TRIP_ROUTE_SOURCE_ID = 'driver-trip-routes';
-const ROUTE_LAYER_IDS = [
-  'driver-route-glow',
-  'driver-route-casing',
-  'driver-route-line',
-];
-const TRIP_ROUTE_LAYER_IDS = ['driver-trip-route-glow', 'driver-trip-route-line'];
-const FALLBACK_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
-
 interface TripRouteCoordinates {
-  approach: [number, number][];
-  trip: [number, number][];
+  approach: RouteCoordinate[];
+  trip: RouteCoordinate[];
 }
+
+const OKC_CENTER: L.LatLngTuple = [35.4676, -97.5164];
+const CARTO_VOYAGER_TILES =
+  'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+const OPENSTREETMAP_TILES = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const OSM_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const CARTO_ATTRIBUTION =
+  `${OSM_ATTRIBUTION} &copy; <a href="https://carto.com/attributions">CARTO</a>`;
 
 function distanceMeters(from: GeoPoint, to: GeoPoint): number {
   const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
@@ -98,7 +97,7 @@ function describeTurn(step: RouteStep): string {
   return step.name ? `${action} onto ${step.name}` : action;
 }
 
-function coordinatesForLegs(legs: Array<{steps: RouteStep[]}>): [number, number][] {
+function coordinatesForLegs(legs: Array<{steps: RouteStep[]}>): RouteCoordinate[] {
   const coordinates = legs.flatMap((leg) =>
     leg.steps.flatMap((step) => step.geometry?.coordinates ?? [])
   );
@@ -125,49 +124,76 @@ function formatDistance(meters: number): string {
   return `In ${(meters / 1609.344).toFixed(1)} mi`;
 }
 
-function createCarElement(): HTMLDivElement {
+function createDriverIcon(heading: number | null): L.DivIcon {
   const element = document.createElement('div');
-  element.className =
-    'flex h-12 w-12 items-center justify-center rounded-full text-[20px] font-black text-[#DFC07D]';
   element.style.cssText =
-    'background:#0b0b0d;border:3px solid #d4af37;box-shadow:0 0 0 5px rgba(212,175,55,.24),0 5px 18px rgba(0,0,0,.85);';
+    'display:flex;width:52px;height:52px;align-items:center;justify-content:center;border:3px solid #d4af37;border-radius:9999px;background:#0b0b0d;color:#dfc07d;font-size:20px;font-weight:900;box-shadow:0 0 0 5px rgba(212,175,55,.24),0 5px 18px rgba(0,0,0,.65);';
   element.setAttribute('aria-label', 'Live driver GPS location');
-  element.textContent = '▲';
-  return element;
+  const arrow = document.createElement('span');
+  arrow.textContent = '▲';
+  arrow.style.transform = `rotate(${heading ?? 0}deg)`;
+  element.appendChild(arrow);
+
+  return L.divIcon({
+    html: element,
+    className: '',
+    iconSize: [52, 52],
+    iconAnchor: [26, 26],
+  });
 }
 
-function createPlaceElement(glyph: string, label: string): HTMLDivElement {
+function createPlaceIcon(glyph: string, label: string): L.DivIcon {
   const element = document.createElement('div');
-  element.className =
-    'flex h-8 w-8 items-center justify-center rounded-full border-2 border-[#f5df9a] bg-[#b8860b] text-xs font-black text-[#0b0b0d] shadow-lg';
+  element.style.cssText =
+    'display:flex;width:36px;height:36px;align-items:center;justify-content:center;border:2px solid #f5df9a;border-radius:9999px;background:#b8860b;color:#0b0b0d;font-size:12px;font-weight:900;box-shadow:0 2px 8px rgba(0,0,0,.5);';
   element.textContent = glyph;
   element.title = label;
-  return element;
+  element.setAttribute('aria-label', label);
+
+  return L.divIcon({
+    html: element,
+    className: '',
+    iconSize: [36, 36],
+    iconAnchor: [18, 18],
+  });
 }
 
 function upsertMarker(
-  map: Map,
-  markerRef: React.MutableRefObject<Marker | null>,
+  map: L.Map,
+  markerRef: React.MutableRefObject<L.Marker | null>,
   point: GeoPoint | null | undefined,
-  element: HTMLElement
+  icon: L.DivIcon,
+  label: string
 ): void {
   if (!point) {
     markerRef.current?.remove();
     markerRef.current = null;
     return;
   }
+
   if (!markerRef.current) {
-    markerRef.current = new maplibregl.Marker({
-      element,
-      anchor: 'center',
-      rotationAlignment: 'map',
-      pitchAlignment: 'map',
-    })
-      .setLngLat([point.lng, point.lat])
-      .addTo(map);
+    markerRef.current = L.marker([point.lat, point.lng], {
+      icon,
+      title: label,
+      keyboard: false,
+    }).addTo(map);
     return;
   }
-  markerRef.current.setLngLat([point.lng, point.lat]);
+
+  markerRef.current.setLatLng([point.lat, point.lng]);
+  markerRef.current.setIcon(icon);
+  markerRef.current.options.title = label;
+  const element = markerRef.current.getElement();
+  if (element) element.title = label;
+}
+
+function clearPolylines(map: L.Map, layers: React.MutableRefObject<L.Polyline[]>): void {
+  layers.current.forEach((layer) => map.removeLayer(layer));
+  layers.current = [];
+}
+
+function routeLatLngs(coordinates: RouteCoordinate[]): L.LatLngTuple[] {
+  return coordinates.map(([lng, lat]) => [lat, lng]);
 }
 
 export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
@@ -192,11 +218,13 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   fullScreen = false,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<Map | null>(null);
-  const carMarkerRef = useRef<Marker | null>(null);
-  const pickupMarkerRef = useRef<Marker | null>(null);
-  const stop1MarkerRef = useRef<Marker | null>(null);
-  const dropoffMarkerRef = useRef<Marker | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const driverMarkerRef = useRef<L.Marker | null>(null);
+  const pickupMarkerRef = useRef<L.Marker | null>(null);
+  const stop1MarkerRef = useRef<L.Marker | null>(null);
+  const dropoffMarkerRef = useRef<L.Marker | null>(null);
+  const routeLayersRef = useRef<L.Polyline[]>([]);
+  const tripRouteLayersRef = useRef<L.Polyline[]>([]);
   const routeRequestRef = useRef<AbortController | null>(null);
   const routeOriginRef = useRef<(GeoPoint & {targetKey: string}) | null>(null);
   const tripRouteRequestRef = useRef<AbortController | null>(null);
@@ -205,7 +233,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   const [mapReady, setMapReady] = useState(false);
   const [watchedPosition, setWatchedPosition] = useState<WatchedPosition | null>(null);
   const [routeSteps, setRouteSteps] = useState<RouteStep[]>([]);
-  const [routeCoordinates, setRouteCoordinates] = useState<[number, number][] | null>(null);
+  const [routeCoordinates, setRouteCoordinates] = useState<RouteCoordinate[] | null>(null);
   const [tripRouteCoordinates, setTripRouteCoordinates] =
     useState<TripRouteCoordinates | null>(null);
   const [routeDistance, setRouteDistance] = useState<number | null>(null);
@@ -222,160 +250,69 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   );
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
+    const container = containerRef.current;
+    if (!container || mapRef.current) return;
 
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: {
-        version: 8,
-        sources: {
-          'carto-voyager': {
-            type: 'raster',
-            tiles: [
-              'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-            ],
-            tileSize: 256,
-            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-          },
-        },
-        layers: [
-          {
-            id: 'carto-voyager',
-            type: 'raster',
-            source: 'carto-voyager',
-            minzoom: 0,
-            maxzoom: 22,
-          },
-        ],
-      },
-      center: OKC_CENTER,
-      zoom: 14,
-      pitch: 0,
-      bearing: 0,
-    });
+    const map = L.map(container, {
+      attributionControl: true,
+      zoomControl: false,
+      preferCanvas: true,
+    }).setView(OKC_CENTER, 15);
     mapRef.current = map;
 
-    let styleLoaded = false;
-    let usedFallback = false;
-    const handleStyleLoad = () => {
-      styleLoaded = true;
-      map.resize();
-      if (!map.getSource(ROUTE_SOURCE_ID)) {
-        map.addSource(ROUTE_SOURCE_ID, {
-          type: 'geojson',
-          data: {type: 'FeatureCollection', features: []},
-        });
-        map.addLayer({
-          id: ROUTE_LAYER_IDS[0],
-          type: 'line',
-          source: ROUTE_SOURCE_ID,
-          layout: {'line-cap': 'round', 'line-join': 'round'},
-          paint: {
-            'line-color': '#2563EB',
-            'line-width': 17,
-            'line-blur': 7,
-            'line-opacity': 0.38,
-          },
-        });
-        map.addLayer({
-          id: ROUTE_LAYER_IDS[1],
-          type: 'line',
-          source: ROUTE_SOURCE_ID,
-          layout: {'line-cap': 'round', 'line-join': 'round'},
-          paint: {
-            'line-color': '#FFFFFF',
-            'line-width': 12,
-            'line-opacity': 1,
-          },
-        });
-        map.addLayer({
-          id: ROUTE_LAYER_IDS[2],
-          type: 'line',
-          source: ROUTE_SOURCE_ID,
-          layout: {'line-cap': 'round', 'line-join': 'round'},
-          paint: {
-            'line-color': '#2563EB',
-            'line-width': 8,
-            'line-opacity': 1,
-          },
-        });
-        map.addSource(TRIP_ROUTE_SOURCE_ID, {
-          type: 'geojson',
-          data: {type: 'FeatureCollection', features: []},
-        });
-        map.addLayer({
-          id: TRIP_ROUTE_LAYER_IDS[0],
-          type: 'line',
-          source: TRIP_ROUTE_SOURCE_ID,
-          layout: {'line-cap': 'round', 'line-join': 'round'},
-          paint: {
-            'line-color': [
-              'match',
-              ['get', 'routeType'],
-              'approach',
-              '#D4AF37',
-              '#2563EB',
-            ],
-            'line-width': 12,
-            'line-blur': 5,
-            'line-opacity': 0.3,
-          },
-        });
-        map.addLayer({
-          id: TRIP_ROUTE_LAYER_IDS[1],
-          type: 'line',
-          source: TRIP_ROUTE_SOURCE_ID,
-          layout: {'line-cap': 'round', 'line-join': 'round'},
-          paint: {
-            'line-color': [
-              'match',
-              ['get', 'routeType'],
-              'approach',
-              '#D4AF37',
-              '#2563EB',
-            ],
-            'line-width': 5,
-            'line-opacity': 0.95,
-          },
-        });
-      }
-      setMapReady(true);
+    let usingFallback = false;
+    let osmTileErrorReported = false;
+    const cartoTiles = L.tileLayer(CARTO_VOYAGER_TILES, {
+      attribution: CARTO_ATTRIBUTION,
+      maxZoom: 20,
+      subdomains: 'abcd',
+    });
+    const fallbackToOpenStreetMap = () => {
+      if (usingFallback) return;
+      usingFallback = true;
+      console.error('Carto Voyager tiles failed; falling back to OpenStreetMap tiles.');
+      map.removeLayer(cartoTiles);
+      const osmTiles = L.tileLayer(OPENSTREETMAP_TILES, {
+        attribution: OSM_ATTRIBUTION,
+        maxZoom: 19,
+        subdomains: 'abc',
+      });
+      osmTiles.on('tileerror', () => {
+        if (osmTileErrorReported) return;
+        osmTileErrorReported = true;
+        console.error('OpenStreetMap tile loading failed.');
+      });
+      osmTiles.addTo(map);
     };
-    const handleMapError = (event: maplibregl.ErrorEvent) => {
-      if (!styleLoaded && !usedFallback) {
-        usedFallback = true;
-        console.error('OpenStreetMap style failed; falling back to Carto Voyager:', event.error);
-        map.setStyle(FALLBACK_STYLE);
-        return;
-      }
-      console.error('Map rendering error:', event.error);
-    };
+    cartoTiles.once('tileerror', fallbackToOpenStreetMap);
+    cartoTiles.addTo(map);
 
-    map.on('style.load', handleStyleLoad);
-    map.on('error', handleMapError);
-    const resizeObserver = new ResizeObserver(() => map.resize());
-    resizeObserver.observe(containerRef.current);
-    map.resize();
+    const resizeObserver = new ResizeObserver(() => map.invalidateSize({pan: false}));
+    resizeObserver.observe(container);
+    map.invalidateSize({pan: false});
+    setMapReady(true);
 
     return () => {
       resizeObserver.disconnect();
-      map.off('style.load', handleStyleLoad);
-      map.off('error', handleMapError);
-      carMarkerRef.current?.remove();
-      pickupMarkerRef.current?.remove();
-      stop1MarkerRef.current?.remove();
-      dropoffMarkerRef.current?.remove();
+      cartoTiles.off('tileerror', fallbackToOpenStreetMap);
+      driverMarkerRef.current = null;
+      pickupMarkerRef.current = null;
+      stop1MarkerRef.current = null;
+      dropoffMarkerRef.current = null;
+      routeLayersRef.current = [];
+      tripRouteLayersRef.current = [];
       map.remove();
       mapRef.current = null;
     };
   }, []);
 
-  useEffect(() => {
-    return () => {
+  useEffect(
+    () => () => {
       routeRequestRef.current?.abort();
       tripRouteRequestRef.current?.abort();
-    };
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     if (!gpsWatchActive || !('geolocation' in navigator)) {
@@ -429,62 +366,65 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    const pickupElement = createPlaceElement('P', pickupLabel);
-    const stop1Element = createPlaceElement('1', stop1Label);
-    const dropoffElement = createPlaceElement('D', dropoffLabel);
-    upsertMarker(map, pickupMarkerRef, pickup, pickupElement);
-    upsertMarker(map, stop1MarkerRef, stop1, stop1Element);
-    upsertMarker(map, dropoffMarkerRef, dropoff, dropoffElement);
+    upsertMarker(
+      map,
+      pickupMarkerRef,
+      pickup,
+      createPlaceIcon('P', pickupLabel),
+      pickupLabel
+    );
+    upsertMarker(
+      map,
+      stop1MarkerRef,
+      stop1,
+      createPlaceIcon('1', stop1Label),
+      stop1Label
+    );
+    upsertMarker(
+      map,
+      dropoffMarkerRef,
+      dropoff,
+      createPlaceIcon('D', dropoffLabel),
+      dropoffLabel
+    );
   }, [mapReady, pickup, pickupLabel, stop1, stop1Label, dropoff, dropoffLabel]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady || !currentCoords) return;
-    const carElement = createCarElement();
-    upsertMarker(map, carMarkerRef, currentCoords, carElement);
-    carMarkerRef.current?.setRotation(heading ?? 0);
-
-    if (isNavigating) {
-      map.easeTo({
-        center: [currentCoords.lng, currentCoords.lat],
-        zoom: 17.5,
-        pitch: 62,
-        bearing: heading ?? map.getBearing(),
-        duration: 700,
-      });
-    } else {
-      map.easeTo({
-        center: [currentCoords.lng, currentCoords.lat],
-        zoom: Math.max(map.getZoom(), 14),
-        pitch: 0,
-        bearing: 0,
-        duration: 500,
-      });
-    }
-  }, [mapReady, currentCoords, heading, isNavigating]);
+    upsertMarker(
+      map,
+      driverMarkerRef,
+      currentCoords,
+      createDriverIcon(heading),
+      driverLabel
+    );
+    const zoom = isNavigating ? 17 : Math.max(map.getZoom(), 15);
+    map.setView([currentCoords.lat, currentCoords.lng], zoom, {
+      animate: true,
+      duration: 0.7,
+    });
+  }, [mapReady, currentCoords, heading, isNavigating, driverLabel]);
 
   useEffect(() => {
-    if (!mapReady || focusRequest === 0) return;
+    if (!mapReady || focusRequest === 0 || !focusCoords) return;
     const map = mapRef.current;
     if (!map) return;
-    if (currentCoords && focusCoords) {
+    if (currentCoords) {
       map.fitBounds(
         [
-          [currentCoords.lng, currentCoords.lat],
-          [focusCoords.lng, focusCoords.lat],
+          [currentCoords.lat, currentCoords.lng],
+          [focusCoords.lat, focusCoords.lng],
         ],
-        {padding: 72, maxZoom: 16, duration: 500}
+        {padding: [72, 72], maxZoom: 16, animate: true, duration: 0.5}
       );
-    } else if (focusCoords) {
-      map.easeTo({
-        center: [focusCoords.lng, focusCoords.lat],
-        zoom: 16,
-        pitch: 0,
-        bearing: 0,
-        duration: 500,
+    } else {
+      map.setView([focusCoords.lat, focusCoords.lng], 16, {
+        animate: true,
+        duration: 0.5,
       });
     }
-  }, [mapReady, focusRequest]);
+  }, [mapReady, focusRequest, focusCoords, currentCoords]);
 
   useEffect(() => {
     if (!activeTripStage || !currentCoords || !pickup || !dropoff) {
@@ -567,14 +507,13 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
     const sameTarget = previousOrigin && previousOrigin.targetKey === targetKey;
     if (sameTarget && distanceMeters(previousOrigin, currentCoords) < 300) return;
 
-    const origin = currentCoords;
     routeRequestRef.current?.abort();
-    routeOriginRef.current = {...origin, targetKey};
     const controller = new AbortController();
+    routeOriginRef.current = {...currentCoords, targetKey};
     routeRequestRef.current = controller;
     const routeUrl =
       `https://router.project-osrm.org/route/v1/driving/` +
-      `${origin.lng},${origin.lat};${targetCoords.lng},${targetCoords.lat}` +
+      `${currentCoords.lng},${currentCoords.lat};${targetCoords.lng},${targetCoords.lat}` +
       '?steps=true&overview=full&geometries=geojson';
 
     const fetchRoute = async () => {
@@ -607,51 +546,72 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    const source = map.getSource(ROUTE_SOURCE_ID) as GeoJSONSource | undefined;
-    if (!source) return;
-    source.setData(
-      routeCoordinates
-        ? {
-            type: 'Feature',
-            properties: {},
-            geometry: {type: 'LineString', coordinates: routeCoordinates},
-          }
-        : {type: 'FeatureCollection', features: []}
-    );
-    ROUTE_LAYER_IDS.forEach((id) => {
-      if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', routeCoordinates ? 'visible' : 'none');
-    });
+    clearPolylines(map, routeLayersRef);
+    if (!routeCoordinates || routeCoordinates.length < 2) return;
+    const latlngs = routeLatLngs(routeCoordinates);
+    routeLayersRef.current = [
+      L.polyline(latlngs, {
+        color: '#2563EB',
+        weight: 18,
+        opacity: 0.24,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+      L.polyline(latlngs, {
+        color: '#FFFFFF',
+        weight: 12,
+        opacity: 0.95,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+      L.polyline(latlngs, {
+        color: '#2563EB',
+        weight: 8,
+        opacity: 1,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+    ];
   }, [mapReady, routeCoordinates]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    const source = map.getSource(TRIP_ROUTE_SOURCE_ID) as GeoJSONSource | undefined;
-    if (!source) return;
-    source.setData(
-      tripRouteCoordinates
-        ? {
-            type: 'FeatureCollection',
-            features: [
-              {
-                type: 'Feature',
-                properties: {routeType: 'approach'},
-                geometry: {type: 'LineString', coordinates: tripRouteCoordinates.approach},
-              },
-              {
-                type: 'Feature',
-                properties: {routeType: 'trip'},
-                geometry: {type: 'LineString', coordinates: tripRouteCoordinates.trip},
-              },
-            ],
-          }
-        : {type: 'FeatureCollection', features: []}
-    );
-    TRIP_ROUTE_LAYER_IDS.forEach((id) => {
-      if (map.getLayer(id)) {
-        map.setLayoutProperty(id, 'visibility', tripRouteCoordinates ? 'visible' : 'none');
-      }
-    });
+    clearPolylines(map, tripRouteLayersRef);
+    if (!tripRouteCoordinates) return;
+
+    const approach = routeLatLngs(tripRouteCoordinates.approach);
+    const trip = routeLatLngs(tripRouteCoordinates.trip);
+    tripRouteLayersRef.current = [
+      L.polyline(approach, {
+        color: '#D4AF37',
+        weight: 12,
+        opacity: 0.3,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+      L.polyline(approach, {
+        color: '#D4AF37',
+        weight: 5,
+        opacity: 0.95,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+      L.polyline(trip, {
+        color: '#2563EB',
+        weight: 12,
+        opacity: 0.3,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+      L.polyline(trip, {
+        color: '#2563EB',
+        weight: 5,
+        opacity: 0.95,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(map),
+    ];
   }, [mapReady, tripRouteCoordinates]);
 
   useEffect(() => {
@@ -680,8 +640,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
     if (spokenStepRef.current === key) return;
     if (spokenStepRef.current) window.speechSynthesis.cancel();
     spokenStepRef.current = key;
-    const utterance = new SpeechSynthesisUtterance(describeTurn(step));
-    window.speechSynthesis.speak(utterance);
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(describeTurn(step)));
   }, [isNavigating, routeSteps, stepIndex]);
 
   const nextStep = routeSteps[stepIndex];
@@ -706,7 +665,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
     : 'bottom-3';
 
   return (
-    <div className={`relative w-full overflow-hidden bg-[#e8eaed] ${heightClass}`}>
+    <div className={`relative w-full overflow-hidden bg-transparent ${heightClass}`}>
       <div
         ref={containerRef}
         className={
@@ -740,15 +699,9 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
             const map = mapRef.current;
             if (!map) return;
             const center = currentCoords
-              ? [currentCoords.lng, currentCoords.lat] as [number, number]
+              ? [currentCoords.lat, currentCoords.lng] as L.LatLngTuple
               : OKC_CENTER;
-            map.easeTo({
-              center,
-              zoom: isNavigating ? 17.5 : 14,
-              pitch: isNavigating ? 62 : 0,
-              bearing: isNavigating ? heading ?? map.getBearing() : 0,
-              duration: 500,
-            });
+            map.setView(center, isNavigating ? 17 : 15, {animate: true, duration: 0.5});
           }}
           className="absolute bottom-[calc(60%+0.75rem)] right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-[#DFC07D] bg-[#0B0B0D]/95 text-[#DFC07D] shadow-[0_0_16px_rgba(212,175,55,0.3)] backdrop-blur-md"
         >
