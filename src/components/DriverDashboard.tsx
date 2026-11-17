@@ -1,5 +1,4 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {createPortal} from 'react-dom';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -195,7 +194,6 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<DriverTab>('home');
   const [earningsTimeframe, setEarningsTimeframe] = useState<EarningsTimeframe>('daily');
-  const [mapFocus, setMapFocus] = useState<{point: GeoPoint; request: number} | null>(null);
 
   // Driver documents normalized with 4 required credentials + expiration dates
   const docs: DriverDocument[] = useMemo(() => {
@@ -266,7 +264,6 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
   const [activeOfferId, setActiveOfferId] = useState<string | null>(null);
   const [offerSecondsLeft, setOfferSecondsLeft] = useState<number>(OFFER_DURATION_SECONDS);
   const [dismissedOfferIds, setDismissedOfferIds] = useState<string[]>([]);
-  const [mapOfferOverlay, setMapOfferOverlay] = useState<HTMLDivElement | null>(null);
 
   // Active Trip Sheet visibility + Wait Timer + In-App Chat Drawer + Call Notice + Rating Modal
   const [isTripSheetOpen, setIsTripSheetOpen] = useState<boolean>(Boolean(activeAcceptedRide));
@@ -1591,10 +1588,6 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     ? calculateHaversineMiles(liveGps, activeTargetCoords)
     : 0;
   const activeEtaMins = estimateEtaMinutes(activeDistanceMiles);
-  const focusMapOn = (point: GeoPoint) => {
-    setMapFocus((current) => ({point, request: (current?.request ?? 0) + 1}));
-  };
-
   const sliderStageLabel =
     activeTripStage === 'en_route_pickup'
       ? 'SLIDE WHEN ARRIVED AT PICKUP'
@@ -1664,6 +1657,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
           ? 'relative h-[calc(100dvh-64px)] min-h-[480px] overflow-hidden'
           : 'relative min-h-full pb-24'
       }`}
+      style={activeTab === 'home' ? {background: 'transparent'} : undefined}
       onPointerMove={(e) => handleSliderPointerMove(e.clientX)}
       onPointerUp={handleSliderPointerEnd}
       onPointerCancel={handleSliderPointerEnd}
@@ -1733,35 +1727,30 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       <main
         className={
           activeTab === 'home'
-            ? 'absolute inset-0 z-0 max-w-none overflow-hidden'
+            ? 'absolute inset-0 z-0 max-w-none overflow-hidden bg-transparent'
             : 'mx-auto flex max-w-3xl flex-col gap-3 px-3.5 pt-3 sm:px-5'
         }
+        style={activeTab === 'home' ? {background: 'transparent'} : undefined}
       >
-        <DarkRadarMap
-          pickup={activeAcceptedRide?.pickupCoords}
-          pickupLabel={activeAcceptedRide?.pickupAddress}
-          stop1={activeAcceptedRide?.stop1Coords}
-          stop1Label={activeAcceptedRide?.stop1Address}
-          dropoff={activeAcceptedRide?.dropoffCoords}
-          dropoffLabel={activeAcceptedRide?.dropoffAddress}
-          driverCoords={liveGps}
-          userGps={liveGps}
-          activeTripStage={activeAcceptedRide ? activeTripStage : undefined}
-          targetCoords={activeAcceptedRide ? activeTargetCoords : null}
-          targetLabel={activeTargetAddress || undefined}
-          focusCoords={mapFocus?.point}
-          focusRequest={mapFocus?.request}
-          gpsWatchActive={gpsWatchActive}
-          overlayContainerRef={setMapOfferOverlay}
-          heightClass={
-            activeTab === 'home'
-              ? 'h-full'
-              : 'h-[300px] rounded-2xl border border-[#D4AF37]'
-          }
-          showRecenterButton={activeTab === 'home'}
-          fullScreen={activeTab === 'home'}
-        />
-
+        {activeTab === 'home' && (
+          <DarkRadarMap
+            fullScreen
+            heightClass="h-full"
+            driverCoords={liveGps}
+            userGps={liveGps}
+            gpsWatchActive={gpsWatchActive}
+            pickup={activeAcceptedRide?.pickupCoords}
+            pickupLabel={activeAcceptedRide?.pickupAddress}
+            stop1={activeAcceptedRide?.stop1Coords}
+            stop1Label={activeAcceptedRide?.stop1Address}
+            dropoff={activeAcceptedRide?.dropoffCoords}
+            dropoffLabel={activeAcceptedRide?.dropoffAddress}
+            activeTripStage={activeAcceptedRide ? activeTripStage : undefined}
+            targetCoords={activeTargetCoords}
+            targetLabel={activeTargetAddress || undefined}
+            showRecenterButton={false}
+          />
+        )}
         {/* Subtle Success Notifications */}
         {activeTab !== 'home' && (cashOutSuccessToast || taxDownloadToast || actionToast) && (
           <div className="rounded-xl border border-[#DFC07D]/60 bg-[#C5A059]/15 px-4 py-3 text-xs font-semibold text-[#DFC07D] flex items-center justify-between gap-2">
@@ -1964,60 +1953,6 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                     </button>
                   </div>
                 </div>
-
-                {/* In-app map focus controls */}
-                {activeTargetCoords && (
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {(
-                        [
-                          {id: 'driver', label: 'Driver', point: liveGps},
-                          {id: 'pickup', label: 'Pickup', point: activeAcceptedRide.pickupCoords},
-                          {id: 'destination', label: 'Destination', point: activeAcceptedRide.dropoffCoords},
-                        ] as const
-                      ).map((app) => (
-                        <button
-                          key={app.id}
-                          type="button"
-                          onClick={() => focusMapOn(app.point)}
-                          className="h-8 rounded-lg border border-[#C5A059]/30 bg-[#020612]/72 text-[11px] font-semibold text-[#B89650] backdrop-blur-[10px] cursor-pointer transition-colors hover:border-[#DFC07D] hover:text-[#DFC07D]"
-                        >
-                          {app.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => focusMapOn(activeTargetCoords)}
-                      className="w-full h-12 rounded-xl btn-gold-luxury text-xs sm:text-sm tracking-[0.14em] uppercase flex items-center justify-center gap-2 shadow-[0_0_22px_rgba(212,175,55,0.3)]"
-                    >
-                      <Navigation className="w-4 h-4 shrink-0" />
-                      <span>
-                        PRESS TO NAVIGATE ·{' '}
-                        {isHeadingToDropoff
-                          ? 'DROP-OFF'
-                          : isHeadingToStop1
-                          ? 'STOP 1'
-                          : 'PICKUP'}
-                      </span>
-                    </button>
-
-                    {activeStop1Coords &&
-                      hasStop1 &&
-                      !isHeadingToStop1 &&
-                      !isHeadingToDropoff && (
-                      <button
-                        type="button"
-                        onClick={() => focusMapOn(activeStop1Coords)}
-                        className="w-full h-9 rounded-lg border border-[#C5A059]/55 bg-[#020612]/72 text-[11px] font-bold tracking-[0.12em] uppercase text-[#DFC07D] hover:border-[#DFC07D] flex items-center justify-center gap-1.5"
-                      >
-                        <Navigation className="w-3.5 h-3.5 text-[#D4AF37]" />
-                        <span>NAVIGATE TO STOP 1</span>
-                      </button>
-                    )}
-                  </div>
-                )}
 
                 {/* 5-Minute Pickup / Stop 1 Wait Timer OR Expired Action Buttons (Right Above TEXT RIDER / CALL RIDER) */}
                 {(activeTripStage === 'arrived_pickup' || activeTripStage === 'arrived_stop1') &&
@@ -3421,9 +3356,9 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
       </main>
 
       {/* ================================================================== */}
-      {/* 5-SECOND INSTANT RIDE OFFER OVERLAY ON THE MAP */}
+      {/* 5-SECOND INSTANT RIDE OFFER OVERLAY */}
       {/* ================================================================== */}
-      {currentOfferRide && !activeAcceptedRide && mapOfferOverlay && createPortal(
+      {currentOfferRide && !activeAcceptedRide && (
         <div
           role="dialog"
           aria-modal="true"
@@ -3561,8 +3496,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
               </div>
             </div>
           </div>
-        </div>,
-        mapOfferOverlay
+        </div>
       )}
 
       {/* ================================================================== */}

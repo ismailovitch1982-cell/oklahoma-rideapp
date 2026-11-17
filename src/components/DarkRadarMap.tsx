@@ -61,7 +61,6 @@ const ROUTE_LAYER_IDS = [
   'driver-route-line',
 ];
 const TRIP_ROUTE_LAYER_IDS = ['driver-trip-route-glow', 'driver-trip-route-line'];
-const OPENSTREETMAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
 const FALLBACK_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
 
 interface TripRouteCoordinates {
@@ -129,9 +128,9 @@ function formatDistance(meters: number): string {
 function createCarElement(): HTMLDivElement {
   const element = document.createElement('div');
   element.className =
-    'flex h-11 w-11 items-center justify-center rounded-full text-[19px] font-black text-[#0b0b0d]';
+    'flex h-12 w-12 items-center justify-center rounded-full text-[20px] font-black text-[#DFC07D]';
   element.style.cssText =
-    'background:linear-gradient(145deg,#fff1ad 0%,#d4af37 42%,#805d13 100%);border:2px solid #fff0ab;box-shadow:0 0 0 5px rgba(212,175,55,.24),0 5px 18px rgba(0,0,0,.85);';
+    'background:#0b0b0d;border:3px solid #d4af37;box-shadow:0 0 0 5px rgba(212,175,55,.24),0 5px 18px rgba(0,0,0,.85);';
   element.setAttribute('aria-label', 'Live driver GPS location');
   element.textContent = '▲';
   return element;
@@ -213,7 +212,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   const [routeDuration, setRouteDuration] = useState<number | null>(null);
   const [stepIndex, setStepIndex] = useState(1);
   const [routeError, setRouteError] = useState<string | null>(null);
-  const currentCoords = watchedPosition?.coords || driverCoords || null;
+  const currentCoords = watchedPosition?.coords || userGps || driverCoords || null;
   const heading = watchedPosition?.heading ?? null;
   const isNavigating = Boolean(
     targetCoords &&
@@ -227,7 +226,28 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: OPENSTREETMAP_STYLE,
+      style: {
+        version: 8,
+        sources: {
+          'carto-voyager': {
+            type: 'raster',
+            tiles: [
+              'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+            ],
+            tileSize: 256,
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+          },
+        },
+        layers: [
+          {
+            id: 'carto-voyager',
+            type: 'raster',
+            source: 'carto-voyager',
+            minzoom: 0,
+            maxzoom: 22,
+          },
+        ],
+      },
       center: OKC_CENTER,
       zoom: 14,
       pitch: 0,
@@ -251,7 +271,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
           source: ROUTE_SOURCE_ID,
           layout: {'line-cap': 'round', 'line-join': 'round'},
           paint: {
-            'line-color': '#D4AF37',
+            'line-color': '#2563EB',
             'line-width': 17,
             'line-blur': 7,
             'line-opacity': 0.38,
@@ -263,8 +283,8 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
           source: ROUTE_SOURCE_ID,
           layout: {'line-cap': 'round', 'line-join': 'round'},
           paint: {
-            'line-color': '#D4AF37',
-            'line-width': 11,
+            'line-color': '#FFFFFF',
+            'line-width': 12,
             'line-opacity': 1,
           },
         });
@@ -275,7 +295,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
           layout: {'line-cap': 'round', 'line-join': 'round'},
           paint: {
             'line-color': '#2563EB',
-            'line-width': 7,
+            'line-width': 8,
             'line-opacity': 1,
           },
         });
@@ -335,6 +355,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
     map.on('error', handleMapError);
     const resizeObserver = new ResizeObserver(() => map.resize());
     resizeObserver.observe(containerRef.current);
+    map.resize();
 
     return () => {
       resizeObserver.disconnect();
