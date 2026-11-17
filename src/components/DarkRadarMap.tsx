@@ -7,6 +7,8 @@ import {ActiveTripStage, GeoPoint} from '../types/rideapp';
 interface DarkRadarMapProps {
   pickup?: GeoPoint;
   pickupLabel?: string;
+  stop1?: GeoPoint;
+  stop1Label?: string;
   dropoff?: GeoPoint;
   dropoffLabel?: string;
   driverCoords?: GeoPoint;
@@ -15,6 +17,8 @@ interface DarkRadarMapProps {
   activeTripStage?: ActiveTripStage;
   targetCoords?: GeoPoint | null;
   targetLabel?: string;
+  focusCoords?: GeoPoint;
+  focusRequest?: number;
   gpsWatchActive?: boolean;
   overlayContainerRef?: React.Ref<HTMLDivElement>;
   heightClass?: string;
@@ -30,6 +34,7 @@ interface RouteStep {
     type: string;
     modifier?: string;
   };
+  geometry?: {coordinates: [number, number][]};
 }
 
 interface OsrmRouteResponse {
@@ -49,13 +54,20 @@ interface WatchedPosition {
 
 const OKC_CENTER: [number, number] = [-97.5164, 35.4676];
 const ROUTE_SOURCE_ID = 'driver-route';
+const TRIP_ROUTE_SOURCE_ID = 'driver-trip-routes';
 const ROUTE_LAYER_IDS = [
   'driver-route-glow',
   'driver-route-casing',
   'driver-route-line',
 ];
-const VOYAGER_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
-const LIBERTY_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const TRIP_ROUTE_LAYER_IDS = ['driver-trip-route-glow', 'driver-trip-route-line'];
+const OPENSTREETMAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const FALLBACK_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+
+interface TripRouteCoordinates {
+  approach: [number, number][];
+  trip: [number, number][];
+}
 
 function distanceMeters(from: GeoPoint, to: GeoPoint): number {
   const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
@@ -85,6 +97,18 @@ function describeTurn(step: RouteStep): string {
       ? `Keep ${modifier || 'straight'}`
       : 'Continue';
   return step.name ? `${action} onto ${step.name}` : action;
+}
+
+function coordinatesForLegs(legs: Array<{steps: RouteStep[]}>): [number, number][] {
+  const coordinates = legs.flatMap((leg) =>
+    leg.steps.flatMap((step) => step.geometry?.coordinates ?? [])
+  );
+  return coordinates.filter(
+    (coordinate, index) =>
+      index === 0 ||
+      coordinate[0] !== coordinates[index - 1][0] ||
+      coordinate[1] !== coordinates[index - 1][1]
+  );
 }
 
 function turnArrow(step?: RouteStep): string {
@@ -150,6 +174,8 @@ function upsertMarker(
 export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   pickup,
   pickupLabel = 'Pickup Point',
+  stop1,
+  stop1Label = 'Stop 1',
   dropoff,
   dropoffLabel = 'Drop-off Destination',
   driverCoords,
@@ -158,6 +184,8 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   activeTripStage,
   targetCoords,
   targetLabel = 'Trip destination',
+  focusCoords,
+  focusRequest = 0,
   gpsWatchActive = false,
   overlayContainerRef,
   heightClass = 'h-full',
@@ -168,14 +196,19 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   const mapRef = useRef<Map | null>(null);
   const carMarkerRef = useRef<Marker | null>(null);
   const pickupMarkerRef = useRef<Marker | null>(null);
+  const stop1MarkerRef = useRef<Marker | null>(null);
   const dropoffMarkerRef = useRef<Marker | null>(null);
   const routeRequestRef = useRef<AbortController | null>(null);
   const routeOriginRef = useRef<(GeoPoint & {targetKey: string}) | null>(null);
+  const tripRouteRequestRef = useRef<AbortController | null>(null);
+  const tripRouteOriginRef = useRef<(GeoPoint & {targetKey: string}) | null>(null);
   const spokenStepRef = useRef<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [watchedPosition, setWatchedPosition] = useState<WatchedPosition | null>(null);
   const [routeSteps, setRouteSteps] = useState<RouteStep[]>([]);
   const [routeCoordinates, setRouteCoordinates] = useState<[number, number][] | null>(null);
+  const [tripRouteCoordinates, setTripRouteCoordinates] =
+    useState<TripRouteCoordinates | null>(null);
   const [routeDistance, setRouteDistance] = useState<number | null>(null);
   const [routeDuration, setRouteDuration] = useState<number | null>(null);
   const [stepIndex, setStepIndex] = useState(1);
@@ -194,7 +227,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: VOYAGER_STYLE,
+      style: OPENSTREETMAP_STYLE,
       center: OKC_CENTER,
       zoom: 14,
       pitch: 0,
@@ -246,14 +279,53 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
             'line-opacity': 1,
           },
         });
+        map.addSource(TRIP_ROUTE_SOURCE_ID, {
+          type: 'geojson',
+          data: {type: 'FeatureCollection', features: []},
+        });
+        map.addLayer({
+          id: TRIP_ROUTE_LAYER_IDS[0],
+          type: 'line',
+          source: TRIP_ROUTE_SOURCE_ID,
+          layout: {'line-cap': 'round', 'line-join': 'round'},
+          paint: {
+            'line-color': [
+              'match',
+              ['get', 'routeType'],
+              'approach',
+              '#D4AF37',
+              '#2563EB',
+            ],
+            'line-width': 12,
+            'line-blur': 5,
+            'line-opacity': 0.3,
+          },
+        });
+        map.addLayer({
+          id: TRIP_ROUTE_LAYER_IDS[1],
+          type: 'line',
+          source: TRIP_ROUTE_SOURCE_ID,
+          layout: {'line-cap': 'round', 'line-join': 'round'},
+          paint: {
+            'line-color': [
+              'match',
+              ['get', 'routeType'],
+              'approach',
+              '#D4AF37',
+              '#2563EB',
+            ],
+            'line-width': 5,
+            'line-opacity': 0.95,
+          },
+        });
       }
       setMapReady(true);
     };
     const handleMapError = (event: maplibregl.ErrorEvent) => {
       if (!styleLoaded && !usedFallback) {
         usedFallback = true;
-        console.error('Carto Voyager style failed; falling back to OpenFreeMap Liberty:', event.error);
-        map.setStyle(LIBERTY_STYLE);
+        console.error('OpenStreetMap style failed; falling back to Carto Voyager:', event.error);
+        map.setStyle(FALLBACK_STYLE);
         return;
       }
       console.error('Map rendering error:', event.error);
@@ -270,6 +342,7 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       map.off('error', handleMapError);
       carMarkerRef.current?.remove();
       pickupMarkerRef.current?.remove();
+      stop1MarkerRef.current?.remove();
       dropoffMarkerRef.current?.remove();
       map.remove();
       mapRef.current = null;
@@ -277,7 +350,10 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
   }, []);
 
   useEffect(() => {
-    return () => routeRequestRef.current?.abort();
+    return () => {
+      routeRequestRef.current?.abort();
+      tripRouteRequestRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -286,35 +362,59 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       return;
     }
 
+    const updatePosition = ({coords}: GeolocationPosition) =>
+      setWatchedPosition({
+        coords: {
+          lat: Number(coords.latitude.toFixed(6)),
+          lng: Number(coords.longitude.toFixed(6)),
+        },
+        heading:
+          coords.heading !== null && Number.isFinite(coords.heading)
+            ? coords.heading
+            : null,
+      });
+    const reportPositionError = (error: GeolocationPositionError) => {
+      console.error('Dark radar GPS update failed:', error.message);
+    };
+    const options: PositionOptions = {enableHighAccuracy: true, maximumAge: 5000};
     const watchId = navigator.geolocation.watchPosition(
-      ({coords}) =>
-        setWatchedPosition({
-          coords: {
-            lat: Number(coords.latitude.toFixed(6)),
-            lng: Number(coords.longitude.toFixed(6)),
-          },
-          heading:
-            coords.heading !== null && Number.isFinite(coords.heading)
-              ? coords.heading
-              : null,
-        }),
-      (error) => {
-        console.error('Dark radar GPS watch failed:', error.message);
-      },
-      {enableHighAccuracy: true, maximumAge: 5000}
+      updatePosition,
+      reportPositionError,
+      options
     );
+    let refreshPending = false;
+    const refreshId = window.setInterval(() => {
+      if (refreshPending) return;
+      refreshPending = true;
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          refreshPending = false;
+          updatePosition(position);
+        },
+        (error) => {
+          refreshPending = false;
+          reportPositionError(error);
+        },
+        {...options, maximumAge: 0, timeout: 8000}
+      );
+    }, 5000);
 
-    return () => navigator.geolocation.clearWatch(watchId);
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+      window.clearInterval(refreshId);
+    };
   }, [gpsWatchActive]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
     const pickupElement = createPlaceElement('P', pickupLabel);
+    const stop1Element = createPlaceElement('1', stop1Label);
     const dropoffElement = createPlaceElement('D', dropoffLabel);
     upsertMarker(map, pickupMarkerRef, pickup, pickupElement);
+    upsertMarker(map, stop1MarkerRef, stop1, stop1Element);
     upsertMarker(map, dropoffMarkerRef, dropoff, dropoffElement);
-  }, [mapReady, pickup, pickupLabel, dropoff, dropoffLabel]);
+  }, [mapReady, pickup, pickupLabel, stop1, stop1Label, dropoff, dropoffLabel]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -341,6 +441,90 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       });
     }
   }, [mapReady, currentCoords, heading, isNavigating]);
+
+  useEffect(() => {
+    if (!mapReady || focusRequest === 0) return;
+    const map = mapRef.current;
+    if (!map) return;
+    if (currentCoords && focusCoords) {
+      map.fitBounds(
+        [
+          [currentCoords.lng, currentCoords.lat],
+          [focusCoords.lng, focusCoords.lat],
+        ],
+        {padding: 72, maxZoom: 16, duration: 500}
+      );
+    } else if (focusCoords) {
+      map.easeTo({
+        center: [focusCoords.lng, focusCoords.lat],
+        zoom: 16,
+        pitch: 0,
+        bearing: 0,
+        duration: 500,
+      });
+    }
+  }, [mapReady, focusRequest]);
+
+  useEffect(() => {
+    if (!activeTripStage || !currentCoords || !pickup || !dropoff) {
+      tripRouteRequestRef.current?.abort();
+      tripRouteRequestRef.current = null;
+      tripRouteOriginRef.current = null;
+      setTripRouteCoordinates(null);
+      return;
+    }
+
+    const waypoints = [currentCoords, pickup, ...(stop1 ? [stop1] : []), dropoff];
+    const targetKey = waypoints
+      .slice(1)
+      .map((point) => `${point.lat},${point.lng}`)
+      .join(';');
+    const previousOrigin = tripRouteOriginRef.current;
+    if (
+      previousOrigin &&
+      previousOrigin.targetKey === targetKey &&
+      distanceMeters(previousOrigin, currentCoords) < 300
+    ) {
+      return;
+    }
+
+    tripRouteRequestRef.current?.abort();
+    const controller = new AbortController();
+    tripRouteRequestRef.current = controller;
+    tripRouteOriginRef.current = {...currentCoords, targetKey};
+    const coordinates = waypoints.map((point) => `${point.lng},${point.lat}`).join(';');
+    const routeUrl =
+      `https://router.project-osrm.org/route/v1/driving/${coordinates}` +
+      '?steps=true&overview=false&geometries=geojson';
+
+    const fetchTripRoutes = async () => {
+      try {
+        const response = await fetch(routeUrl, {signal: controller.signal});
+        if (!response.ok) throw new Error(`OSRM returned HTTP ${response.status}`);
+        const data = (await response.json()) as OsrmRouteResponse;
+        const route = data.routes?.[0];
+        if (data.code !== 'Ok' || !route || route.legs.length < 2) {
+          throw new Error(`OSRM could not find trip routes (${data.code})`);
+        }
+        const approach = coordinatesForLegs([route.legs[0]]);
+        const trip = coordinatesForLegs(route.legs.slice(1));
+        if (approach.length < 2 || trip.length < 2) {
+          throw new Error('OSRM returned incomplete trip route geometry');
+        }
+        setTripRouteCoordinates({approach, trip});
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setTripRouteCoordinates(null);
+        console.error('Trip route request failed:', error);
+      } finally {
+        if (tripRouteRequestRef.current === controller) {
+          tripRouteRequestRef.current = null;
+        }
+      }
+    };
+
+    void fetchTripRoutes();
+  }, [activeTripStage, currentCoords, pickup, stop1, dropoff]);
 
   useEffect(() => {
     if (!targetCoords || !currentCoords || !activeTripStage) {
@@ -417,6 +601,37 @@ export const DarkRadarMap: React.FC<DarkRadarMapProps> = ({
       if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', routeCoordinates ? 'visible' : 'none');
     });
   }, [mapReady, routeCoordinates]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const source = map.getSource(TRIP_ROUTE_SOURCE_ID) as GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(
+      tripRouteCoordinates
+        ? {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                properties: {routeType: 'approach'},
+                geometry: {type: 'LineString', coordinates: tripRouteCoordinates.approach},
+              },
+              {
+                type: 'Feature',
+                properties: {routeType: 'trip'},
+                geometry: {type: 'LineString', coordinates: tripRouteCoordinates.trip},
+              },
+            ],
+          }
+        : {type: 'FeatureCollection', features: []}
+    );
+    TRIP_ROUTE_LAYER_IDS.forEach((id) => {
+      if (map.getLayer(id)) {
+        map.setLayoutProperty(id, 'visibility', tripRouteCoordinates ? 'visible' : 'none');
+      }
+    });
+  }, [mapReady, tripRouteCoordinates]);
 
   useEffect(() => {
     if (!currentCoords || stepIndex >= routeSteps.length - 1) return;

@@ -11,7 +11,6 @@ import {
   Clock,
   DollarSign,
   Download,
-  ExternalLink,
   FileCheck2,
   FileText,
   Headphones,
@@ -52,7 +51,6 @@ import {
 } from '../types/rideapp';
 import {
   OKLAHOMA_LANDMARKS,
-  buildNativeNavigationLinks,
   calculateCoopFare,
   calculateHaversineMiles,
   getDefaultUpcomingSlot,
@@ -72,7 +70,6 @@ interface DriverDashboardProps {
 
 type DriverTab = 'home' | 'earnings' | 'profile' | 'support';
 type EarningsTimeframe = 'daily' | 'weekly' | 'monthly' | 'yearly';
-type MapAppChoice = 'appleMaps' | 'googleMaps' | 'waze';
 
 const OFFER_DURATION_SECONDS = 5;
 const FREE_WAIT_LIMIT_SECONDS = 300; // 05:00 free wait / Stop 1 limit
@@ -198,7 +195,7 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<DriverTab>('home');
   const [earningsTimeframe, setEarningsTimeframe] = useState<EarningsTimeframe>('daily');
-  const [preferredNavApp, setPreferredNavApp] = useState<MapAppChoice>('googleMaps');
+  const [mapFocus, setMapFocus] = useState<{point: GeoPoint; request: number} | null>(null);
 
   // Driver documents normalized with 4 required credentials + expiration dates
   const docs: DriverDocument[] = useMemo(() => {
@@ -1568,8 +1565,9 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
 
   // Live Active Trip target metrics (switches Pickup -> Stop 1 -> Dropoff across stages)
   const activeTripStage: ActiveTripStage = activeAcceptedRide?.tripStage || 'en_route_pickup';
+  const activeStop1Coords = activeAcceptedRide?.stop1Coords;
   const hasStop1 = Boolean(
-    activeAcceptedRide?.stop1Address && activeAcceptedRide?.stop1Coords
+    activeAcceptedRide?.stop1Address && activeStop1Coords
   );
   const isHeadingToStop1 =
     hasStop1 && (activeTripStage === 'arrived_pickup' || activeTripStage === 'en_route_stop1');
@@ -1593,12 +1591,9 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
     ? calculateHaversineMiles(liveGps, activeTargetCoords)
     : 0;
   const activeEtaMins = estimateEtaMinutes(activeDistanceMiles);
-  const activeNavLinks = activeTargetCoords
-    ? buildNativeNavigationLinks(activeTargetCoords)
-    : null;
-  const stop1NavLinks = activeAcceptedRide?.stop1Coords
-    ? buildNativeNavigationLinks(activeAcceptedRide.stop1Coords)
-    : null;
+  const focusMapOn = (point: GeoPoint) => {
+    setMapFocus((current) => ({point, request: (current?.request ?? 0) + 1}));
+  };
 
   const sliderStageLabel =
     activeTripStage === 'en_route_pickup'
@@ -1745,6 +1740,8 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
         <DarkRadarMap
           pickup={activeAcceptedRide?.pickupCoords}
           pickupLabel={activeAcceptedRide?.pickupAddress}
+          stop1={activeAcceptedRide?.stop1Coords}
+          stop1Label={activeAcceptedRide?.stop1Address}
           dropoff={activeAcceptedRide?.dropoffCoords}
           dropoffLabel={activeAcceptedRide?.dropoffAddress}
           driverCoords={liveGps}
@@ -1752,6 +1749,8 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
           activeTripStage={activeAcceptedRide ? activeTripStage : undefined}
           targetCoords={activeAcceptedRide ? activeTargetCoords : null}
           targetLabel={activeTargetAddress || undefined}
+          focusCoords={mapFocus?.point}
+          focusRequest={mapFocus?.request}
           gpsWatchActive={gpsWatchActive}
           overlayContainerRef={setMapOfferOverlay}
           heightClass={
@@ -1966,37 +1965,32 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                   </div>
                 </div>
 
-                {/* Prominent Metallic Gold PRESS TO NAVIGATE + Native Map App Selector */}
-                {activeNavLinks && (
+                {/* In-app map focus controls */}
+                {activeTargetCoords && (
                   <div className="space-y-2">
                     <div className="grid grid-cols-3 gap-1.5">
                       {(
                         [
-                          {id: 'googleMaps', label: 'Google Maps'},
-                          {id: 'appleMaps', label: 'Apple Maps'},
-                          {id: 'waze', label: 'Waze'},
+                          {id: 'driver', label: 'Driver', point: liveGps},
+                          {id: 'pickup', label: 'Pickup', point: activeAcceptedRide.pickupCoords},
+                          {id: 'destination', label: 'Destination', point: activeAcceptedRide.dropoffCoords},
                         ] as const
                       ).map((app) => (
                         <button
                           key={app.id}
                           type="button"
-                          onClick={() => setPreferredNavApp(app.id)}
-                          className={`h-8 rounded-lg border text-[11px] font-semibold cursor-pointer transition-colors ${
-                            preferredNavApp === app.id
-                              ? 'border-[#DFC07D] bg-[#C5A059]/20 text-[#DFC07D]'
-                              : 'border-[#C5A059]/30 bg-[#020612]/72 backdrop-blur-[10px] text-[#B89650] hover:text-[#DFC07D]'
-                          }`}
+                          onClick={() => focusMapOn(app.point)}
+                          className="h-8 rounded-lg border border-[#C5A059]/30 bg-[#020612]/72 text-[11px] font-semibold text-[#B89650] backdrop-blur-[10px] cursor-pointer transition-colors hover:border-[#DFC07D] hover:text-[#DFC07D]"
                         >
                           {app.label}
                         </button>
                       ))}
                     </div>
 
-                    <a
-                      href={activeNavLinks[preferredNavApp]}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="w-full h-12 rounded-xl btn-gold-luxury text-xs sm:text-sm tracking-[0.14em] uppercase flex items-center justify-center gap-2 no-underline shadow-[0_0_22px_rgba(212,175,55,0.3)]"
+                    <button
+                      type="button"
+                      onClick={() => focusMapOn(activeTargetCoords)}
+                      className="w-full h-12 rounded-xl btn-gold-luxury text-xs sm:text-sm tracking-[0.14em] uppercase flex items-center justify-center gap-2 shadow-[0_0_22px_rgba(212,175,55,0.3)]"
                     >
                       <Navigation className="w-4 h-4 shrink-0" />
                       <span>
@@ -2007,20 +2001,20 @@ export const DriverDashboard: React.FC<DriverDashboardProps> = ({
                           ? 'STOP 1'
                           : 'PICKUP'}
                       </span>
-                      <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                    </a>
+                    </button>
 
-                    {hasStop1 && stop1NavLinks && !isHeadingToStop1 && !isHeadingToDropoff && (
-                      <a
-                        href={stop1NavLinks[preferredNavApp]}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-full h-9 rounded-lg border border-[#C5A059]/55 bg-[#020612]/72 backdrop-blur-[10px] hover:border-[#DFC07D] text-[11px] font-bold tracking-[0.12em] uppercase text-[#DFC07D] flex items-center justify-center gap-1.5 no-underline"
+                    {activeStop1Coords &&
+                      hasStop1 &&
+                      !isHeadingToStop1 &&
+                      !isHeadingToDropoff && (
+                      <button
+                        type="button"
+                        onClick={() => focusMapOn(activeStop1Coords)}
+                        className="w-full h-9 rounded-lg border border-[#C5A059]/55 bg-[#020612]/72 text-[11px] font-bold tracking-[0.12em] uppercase text-[#DFC07D] hover:border-[#DFC07D] flex items-center justify-center gap-1.5"
                       >
                         <Navigation className="w-3.5 h-3.5 text-[#D4AF37]" />
                         <span>NAVIGATE TO STOP 1</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
+                      </button>
                     )}
                   </div>
                 )}
